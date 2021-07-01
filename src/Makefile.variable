@@ -1,0 +1,16 @@
+# Copyright (C) 2021 Intel Corporation
+# SPDX-License-Identifier: BSD-3-Clause
+
+LLC ?= llc
+CLANG ?= clang
+CC ?= gcc
+
+SBINDIR?=/sbin
+PREFIX?=/usr
+LIBDIR?=$(PREFIX)/lib/hostint
+KMAJ=$(shell uname -r | awk -F '.' '{ print $$1 }')
+KMIN=$(shell uname -r | awk -F '.' '{ print $$2 }')
+SUPPORT_BOOTTIME=$(shell [ $(KMAJ) -gt 5 -o \( $(KMAJ) -eq 5 -a $(KMIN) -ge 8 \) ] && echo true)
+
+#turn off SUPPORT_BOOTTIME for now because we are using an old version libbpf
+SUPPORT_BOOTTIME=false

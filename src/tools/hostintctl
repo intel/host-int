@@ -1,0 +1,201 @@
+#!/bin/bash
+
+# Copyright (C) 2021 Intel Corporation
+# SPDX-License-Identifier: BSD-3-Clause
+
+readonly DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly BASENAME="$(basename $0)"
+opt_dev=
+opt_quiet=0
+opt_prog_type=
+opt_unload=0
+opt_filename=
+opt_cfg=""
+has_cfg=0
+
+function usage() {
+  1>&2 echo "Usage: $BASENAME [options]"
+  1>&2 echo ""
+  1>&2 echo "DESCRIPTION:"
+  1>&2 echo "  INT Edge-to-Edge Control Program that is able to load/unload source EBPF"
+  1>&2 echo "program, and config both sink and source EBPF programs. This command shall"
+  1>&2 echo "work with hostintd to ensure proper maintenance on shared maps."
+  1>&2 echo ""
+  1>&2 echo "Required options:"
+  1>&2 echo " -d, --dev <ifname>         Operate on device <ifname>"
+  1>&2 echo " -T, --prog-type            Program type. Can be 'SINK' or 'SOURCE'"
+  1>&2 echo ""
+  1>&2 echo "Other options:"
+  1>&2 echo " -h, --help                 Show help"
+  1>&2 echo " -q, --quiet                Quiet mode (no output)"
+  1>&2 echo " -n, --node-id              Node ID"
+  1>&2 echo " -v, --dscp-val             DSCP Value"
+  1>&2 echo " -m, --dscp-mask            DSCP Mask"
+  1>&2 echo "     --filter-filename      Traffic classification (allow list) <file>"
+  1>&2 echo " -t, --idle-flow-timeout-ms"
+  1>&2 echo "                            Idle flow clear timeout (ms)"
+  1>&2 echo " -l, --pkg-loss-timeout-ms  Package loss timeout (ms)"
+  1>&2 echo " -U, --unload               Unload source ebpf program"
+  1>&2 echo "     --filename             Source EBPF program filename"
+}
+
+function err_msg() {
+  1>&2 echo "Error - $1"
+}
+
+function warn_msg() {
+  1>&2 echo "Warning - $1"
+}
+
+function verb_msg() {
+  [ $opt_quiet != 1 ] && echo "$1"
+}
+
+function parse_options() {
+  opts=$(getopt -o d:hqT:n:v:m:t:l:U \
+                -l dev,help,quiet,prog-type:,node-id:,dscp-val:,dscp-mask:,idle-flow-timeout-ms:,pkg-loss-timeout-ms:,unload,filename:,filter-filename: \
+                -n "$BASENAME" -- "$@")
+  if [ $? != 0 ]; then
+    1>&2 echo "Terminating..."
+    usage
+    exit 1
+  fi
+
+  eval set -- "$opts"
+  while true; do
+    case "$1" in
+      -d | --dev)
+        opt_dev="$2"
+        opt_cfg="${opt_cfg}$1 $2 "
+        shift 2;;
+      -h | --help)
+        usage
+        exit 0;;
+      -q | --quiet)
+        opt_quiet=1
+        opt_cfg="${opt_cfg}$1 "
+        shift;;
+      -T | --prog-type)
+        opt_prog_type="$2"
+        opt_cfg="${opt_cfg}$1 $2 "
+        shift 2;;
+      -n | -v | -m | -t | -l)
+        opt_cfg="${opt_cfg}$1 $2 "
+        has_cfg=1
+        shift 2;;
+      --node-id | --dscp-val | --dscp-mask | --idle-flow-timeout-ms | --pkg-loss-timeout-ms | --filter-filename)
+        opt_cfg="${opt_cfg}$1 $2 "
+        has_cfg=1
+        shift 2;;
+      -U | --unload)
+        opt_unload=1
+        shift;;
+      --filename)
+        opt_filename="$2"
+        shift 2;;
+      --)
+        shift
+        break;;
+      *)
+        break;;
+    esac
+  done
+  if [ "$#" -ne 0 ]; then
+	  err_msg "Extra command line arguments '$*'"
+	  usage
+	  exit 1
+  fi
+  if [ -z "${opt_dev}" ]; then
+    err_msg "Required option --dev missing"
+    usage
+    exit 1
+  fi
+  if [ -z "${opt_prog_type}" ]; then
+    err_msg "Required option --prog-type missing"
+    usage
+    exit 1
+  fi
+  if [[ "${opt_prog_type^^}" = "SINK" ]]; then
+    if [[ ${opt_unload} -eq 1 ]]; then
+      opt_unload=0
+      warn_msg "Program type is SINK. Ignore option --unload"
+    fi
+    if [[ -n "${opt_filename}"  ]]; then
+      opt_filename=""
+      warn_msg "Program type is SINK. Ignore program file' $opt_filename'"
+    fi
+  elif [[ ! "${opt_prog_type^^}" = "SOURCE" ]]; then
+    err_msg "Unknown program type ${opt_prog_type^^}"
+    usage
+    exit 1
+  fi
+}
+
+function check_cmd() {
+  cmd=$1
+
+  if ! type ${cmd} >/dev/null 2>&1; then
+    err_msg "Couldn't find command '${cmd}'"
+    exit 1
+  fi
+}
+
+function load_source_ebpf() {
+  check_cmd tc
+
+  dev=$1
+  file=$2
+  if [ ! -f "${file}" ]; then
+    err_msg "File '${file}' doesn't exist"
+    exit 1
+  fi
+  if [ ${opt_quiet} -eq 1 ]; then
+    verbose=""
+  else
+    verbose="verbose"
+  fi
+  if tc qdisc add dev "${dev}" clsact && tc filter add dev "${dev}" egress bpf da object-file "${file}" section source_egress $verbose; then
+    verb_msg "Successfully load source EBPF '${file}' on ${dev}"
+  fi
+}
+
+function unload_source_ebpf() {
+  check_cmd tc
+
+  dev=$1
+  if tc qdisc del dev "${dev}" clsact; then
+    verb_msg "Successfully unload source EBPF from ${dev}"
+  fi
+}
+
+function main() {
+  parse_options "$@"
+
+  if [[ ${opt_unload} -eq 1 ]]; then
+    unload_source_ebpf "${opt_dev}"
+    exit 0
+  elif [ -n "${opt_filename}" ]; then
+    load_source_ebpf "${opt_dev}" "${opt_filename}" || exit 1
+  fi
+
+  if [[ ${has_cfg} -eq 0 ]]; then
+    exit 0
+  fi
+
+  # try hostintcfg under hostintctl folder first
+  # if doesn't exist, try system PATH
+  if type $DIR/hostintcfg >/dev/null 2>&1; then
+    $DIR/hostintcfg ${opt_cfg} || exit 1
+  elif type hostintcfg >/dev/null 2>&1; then
+    hostintcfg ${opt_cfg} || exit 1
+  else
+    err_msg "Couldn't find hostintcfg"
+    exit 1
+  fi
+
+  check_cmd pkill
+  pkill -SIGHUP hostintd || :
+}
+
+trap "exit ${USR_INT}" SIGHUP SIGTERM SIGINT
+main "$@"

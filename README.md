@@ -2,25 +2,25 @@
 
 (* Other names and brands may be claimed as the property of others.)
 
+The full name of this project is "Host-INT for packet-telemetry", but
+we will usually refer to it as "Host-INT*".
+
 What is Host-INT* for packet-telemetry?
 
 * INT is [Inband Network Telemetry](https://p4.org/specs), a public
-  specification published by the P4.org Applications Working Group of
-  header formats and report packet formats for network telemetry.
-* A data center operator can run the Host-INT* for packet-telemetry
-  software on any or all of the hosts in their network.
-  * Provides data to measure packet loss and one-way packet latency
-    between hosts in their network, independently for each application
-    flow.
-  * Does its job by adding INT headers to packets of selected TCP/UDP
-    flows, where these INT headers contain per-flow packet sequence
-    numbers and timestamps.
-  * By default, all collected data is restricted to the systems
-    running Host-INT* for packet-telemetry and the network connecting
-    them.
-    * Alternately, there is an option to send the report data to an
-      INT collector, which is a data collection and analysis system,
-      e.g. Intel's [Deep Insight Network Analytics
+  specification of header formats and report packet formats for network telemetry, published by the P4.org Applications Working Group.
+* A data center operator can run the Host-INT* software on any or all
+  of the hosts in their network.
+  * All endpoints of a flow must be enabled for Host-INT* 
+  * Measures packet loss and one-way packet latency between enabled
+    hosts in the network, independently for each application flow.
+  * Instruments packets of selected TCP/UDP flows by adding INT
+    headers, containing per-flow packet sequence numbers and
+    timestamps.
+  * By default, telemetry data is collected by systems running Host-INT*.
+    * Alternately, you may configure Host-INT* to send telemetry data
+      to an INT collector for network wide analysis, e.g. Intel's
+      [Deep Insight Network Analytics
       software](https://www.intel.com/content/www/us/en/products/network-io/programmable-ethernet-switch.html)
 * Future releases are planned to enable additional telemetry data
   measurement and collection, assisted by INT-enabled network
@@ -36,16 +36,15 @@ which this code is released.
 # Documentation
 
 This [slide deck](docs/host-int-project.pptx) gives a technical
-overview of the programs involved in the Host-INT* for
-packet-telemetry project, including which parts of the software run as
-user space programs vs. as EBPF programs loaded into the kernel, and
-the purpose of each program.
+overview of the programs involved in the Host-INT* project, including
+which parts of the software run as user space programs vs. as EBPF
+programs loaded into the kernel, and the purpose of each program.
 
 This project uses slight variations of the INT header formats, versus
 what is documented in the published specifications.  The primary
 reason for these extensions is to include a per-flow packet sequence
 number to enable packet loss detection.  See
-[INT_Edge_to_Edge.md](docs/INT_Edge_to_Edge.md) for details of these
+[Host_INT_fmt.md](docs/Host_INT_fmt.md) for details of these
 header format differences.
 
 
@@ -99,6 +98,9 @@ $ sudo make install
 
 # Configuration
 
+
+## Edit the `hostintd` configuration file
+
 Edit the file `/etc/hostintd.cfg` to specify the network interface
 that will receive packets with INT headers, and the node id for this
 interface.  This version of the project supports only one network
@@ -108,6 +110,46 @@ software.
 A user can specify other parameters in this configuration file as
 well.  Please see the output of `hostintd -h` for the available
 parameters.
+
+
+## Disable NIC offloads that conflict with Host-INT*
+
+So far we have tested Host-INT* most with all transmit and receive
+offloads disabled on the interface where it is enabled, using a
+command like the following:
+
+```bash
+sudo ethtool -K <interface> rx off tx off
+```
+
+Host-INT* may also work correctly with fewer of these features
+disabled.  This documentation will be updated when this has been
+tested to confirm.
+
+
+## Reduce the TCP MSS
+
+In its initial release, Host-INT* adds 36 bytes of INT headers to
+selected IPv4+TCP and IPv4+UDP packets.  It cannot add these headers
+if this would cause the modified packet to increase in size above the
+MTU configured for the outgoing interface.
+
+For TCP, one can ensure that sufficient room is available by
+configuring the Maximum Segment Size (MSS) of the output interface to
+be small enough.
+
+The MSS should be configured to be 76 bytes less than the MTU of the
+interface.  This leaves room for 20 bytes for an IPv4 header, plus 20
+bytes for a TCP header without options, plus 36 bytes for the INT
+header.
+
+For example, if an interface `en0` on which Host-INT* has been
+configured has an MTU of 1500 bytes, the following command can be used
+to configure its MSS to 1500 - 76 = 1424 bytes:
+
+```bash
+ip route add 10.0.0.1/24 dev en0 advmss 1424
+```
 
 
 # Enabling hosts to receive packets with INT headers
@@ -147,7 +189,7 @@ sudo systemctl stop hostintd
 # Enabling hosts to send packets with INT headers
 
 Do this on a host that you wish to send packets with INT headers, to
-enable the Host INT performance monitoring and debug features for
+enable the Host-INT* performance monitoring and debug features for
 packets sent from this host to hosts ready to receive them.
 
 ```
@@ -172,8 +214,8 @@ names and/or destination IPv4 addresses, one per line.
 For other available parameters, see the output of the command
 `hostinctctl -h`.
 
-NOTE: With an empty allow list, Host INT will not function, because no
-packets will have destination addresses matching one in the allow
+NOTE: With an empty allow list, Host-INT* will not function, because
+no packets will have destination addresses matching one in the allow
 list.
 
 
@@ -190,45 +232,31 @@ Checking packet latency when sending data from the host S interface
 `eth1` to the host R interface `eno1`
 
 * On the host S:
- 1. clone, or download and extract Host INT
- 2. in Host INT directory
-    ```
-    cd src
-    make
-    sudo make install
-    ```
-    NOTE: Please ensure build dependencies were installed
- 3. edit `/etc/hostintd.cfg` with below content
+ 1. Install Host-INT* software, following the steps above.
+ 2. edit `/etc/hostintd.cfg` with below content
     ```
     DEV=eth1
     NODEID=2
     OPT=-v 0x04 -m 0x04 --filename /usr/lib/hostint/intmd_xdp_ksink.o -o /var/log/hostintd_report.log
     ```
- 4. launch hostintd service
+ 3. launch hostintd service
     ```
     sudo systemctl start hostintd
     ```
- 5. load source EBPF program
+ 4. load source EBPF program
     ```
     sudo hostintctl -d eth1 -T source --filename /usr/lib/hostint/intmd_tc_ksource.o --filter-filename filter.txt
     ```
 * On the host R:
- 1. clone, or download and extract Host INT
- 2. in Host INT directory
-    ```
-    cd src
-    make
-    sudo make install
-    ```
-    NOTE: Please ensure build dependencies were installed
- 3. edit /etc/hostintd.cfg with below content
+ 1. Install Host-INT* software, following the steps above.
+ 2. edit /etc/hostintd.cfg with below content
     ```
     DEV=eno1
     NODEID=3
     OPT=-v 0x04 -m 0x04 --filename /usr/lib/hostint/intmd_xdp_ksink.o -o /var/log/hostintd_report.log
     ```
     NOTE: the host R has NODEID=3, while the host S has NODEID=2
- 4. launch hostintd service
+ 3. launch hostintd service
     ```
     sudo systemctl start hostintd
     ```
@@ -250,6 +278,8 @@ Checking packet latency when sending data from the host S interface
 * On each system, at most one network interface can be enabled for
   receiving packets with INT headers, or sending packets with INT
   headers.
+* Only IPv4+TCP and IPv4+UDP packets are supported in the first
+  release for addition of INT headers.
 * The current implementation uses timestamps from Linux's
   `CLOCK_REALTIME` clock, which is typically synchronized with one or
   more time servers using NTP, the [Network Time
@@ -264,6 +294,48 @@ Checking packet latency when sending data from the host S interface
   future, perhaps one based on the
   [Huygens](https://www.usenix.org/conference/nsdi18/presentation/geng)
   clock synchronization algorithm.
+
+
+## Limitations specific to UDP packets
+
+* If an application sends a UDP packet such that its payload plus
+  IPv4+UDP headers is at most the MTU of the network interface, but
+  after adding the 36 bytes of INT headers it would exceed the MTU,
+  then the source host will not add INT headers to the packet, and
+  thus no INT reports will ever be generated for such packets.  Other
+  similar examples that may be less obvious:
+  * If an application sends a UDP packet such that its payload plus
+    IPv4+UDP headers is larger than the interface MTU, it will be
+    fragmented at the IP layer, resulting in two or more IPv4+UDP
+    packets.  The conditions above for deciding whether an INT header
+    is added to a packet is made independently for each fragment, so
+    it is possible that _none_ of the fragments will have an INT
+    header, or that only some of them will.
+
+
+## Limitations specific to TCP packets
+
+Because the TCP-specific limitations of this release of Host-INT*
+software are more severe, we consider UDP to be supported, but not
+TCP.  Treat the TCP-specific parts of this project as a preview of
+what is to come.
+
+* NIC offload features such as
+  [TSO](https://en.wikipedia.org/wiki/Large_send_offload)
+  must be disabled for Host-INT* to correctly add INT headers to
+  IPv4+TCP packets sent.
+* You must reduce the TCP MSS in order for Host-INT* to have room to
+  add INT headers to IPv4+TCP packets sent.  If you do not do so, TCP
+  packets that are MTU size or slightly smaller will be sent without
+  INT headers added.
+* There is a known issue where the contents of INT reports generated
+  due to TCP packets can be filled in with incorrect values.
+* This release of Host-INT* software reduces the throughput of TCP
+  traffic quite significantly, in part because the choices made for
+  adding INT headers led us to calculate a full TCP payload checksum
+  on every TCP packet sent with INT headers added.  We will find
+  improvements for this performance, perhaps by using other choices
+  for how INT headers are added to TCP packets.
 
 
 # Future work

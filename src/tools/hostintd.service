@@ -1,0 +1,16 @@
+# Copyright (C) 2021 Intel Corporation
+# SPDX-License-Identifier: BSD-3-Clause
+[Unit]
+Description=HostINT Daemon
+#Document=man::hostintd(8)
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/hostintd.cfg
+ExecStartPre=/bin/sh -c '/bin/mount | /bin/grep bpf || /bin/mount -t bpf bpf /sys/fs/bpf/'
+ExecStart=/sbin/hostintd -d $DEV -n $NODEID $OPT
+ExecReload=/bin/kill -HUP $MAINPID
+
+[Install]
+WantedBy=multi-user.target
