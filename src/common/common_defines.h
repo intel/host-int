@@ -8,9 +8,14 @@
 #include <net/if.h>
 #include <linux/types.h>
 #include <stdbool.h>
+#include "intbpf.h"
+
+#define VERSION "0.1.0-alpha"
 
 #define PT_SINK 1
 #define PT_SOURCE 2
+#define ENCAP_INT_05_OVER_TCP_UDP 1
+#define ENCAP_INT_05_EXTENSION_UDP 2
 
 struct config {
     __u32 xdp_flags;
@@ -40,9 +45,13 @@ struct config {
     int server_port;
     char report_file[512];
     int sender_collector_port;
+    bool drop_packet;
     int port;
     char bind_addr[16];
     int prog_type;
+    struct latency_bucket_entries latency_entries;
+    int num_latency_entries;
+    int encap_type;
 };
 
 /* Defined in common_params.o */
@@ -95,6 +104,7 @@ extern int verbose;
 #define SINK_MAP_EVENT_PERF "sink_event_perf_map"
 #define SINK_MAP_FLOW_STATS "sink_flow_stats_map"
 #define SINK_MAP_CONFIG "sink_config_map"
+#define SINK_MAP_LATENCY "latency_bucket_map"
 #define SOURCE_MAP_EVENT_PERF "src_event_perf_map"
 #define SOURCE_MAP_FLOW_STATS "src_flow_stats_map"
 #define SOURCE_MAP_CONFIG "src_config_map"

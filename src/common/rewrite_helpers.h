@@ -19,8 +19,8 @@
 /* Pops the outermost VLAN tag off the packet. Returns the popped VLAN ID on
  * success or negative errno on failure.
  */
-static __always_inline int vlan_tag_pop(struct xdp_md *ctx,
-                                        struct ethhdr *eth) {
+static __always_inline int vlan_tag_pop(struct xdp_md *ctx, struct ethhdr *eth)
+{
     void *data_end = (void *)(long)ctx->data_end;
     struct ethhdr eth_cpy;
     struct vlan_hdr *vlh;
@@ -67,7 +67,8 @@ static __always_inline int vlan_tag_pop(struct xdp_md *ctx,
  * -1 on failure.
  */
 static __always_inline int vlan_tag_push(struct xdp_md *ctx, struct ethhdr *eth,
-                                         int vlid) {
+                                         int vlid)
+{
     void *data_end = (void *)(long)ctx->data_end;
     struct ethhdr eth_cpy;
     struct vlan_hdr *vlh;
@@ -107,7 +108,8 @@ static __always_inline int vlan_tag_push(struct xdp_md *ctx, struct ethhdr *eth,
 }
 
 static __always_inline int
-variable_length_csum_diff(__u8 *start, __u16 len, __u8 *data_end, __u32 *csum) {
+variable_length_csum_diff(__u8 *start, __u16 len, __u8 *data_end, __u32 *csum)
+{
     __be32 tmp;
     /* This is what we would ideally like to write, but it is not
      * easy to see how to make it pass the kernel verifier. */
@@ -276,7 +278,8 @@ variable_length_csum_diff(__u8 *start, __u16 len, __u8 *data_end, __u32 *csum) {
 
 static __always_inline int skb_variable_length_csum_diff(struct __sk_buff *skb,
                                                          __u8 *start, __u16 len,
-                                                         __u32 *csum) {
+                                                         __u32 *csum)
+{
     int ret;
     __u8 buf[128];
     /* This is what we would ideally like to write, but it is not
@@ -368,7 +371,8 @@ static __always_inline int skb_variable_length_csum_diff(struct __sk_buff *skb,
     return 0;
 }
 
-static __always_inline __u16 csum_fold_helper(__u32 csum) {
+static __always_inline __u16 csum_fold_helper(__u32 csum)
+{
     csum = ((csum & 0xffff) + (csum >> 16));
     return ~((csum & 0xffff) + (csum >> 16));
 }
@@ -376,7 +380,8 @@ static __always_inline __u16 csum_fold_helper(__u32 csum) {
 /* Note: ipv4_csum currently only works correctly for IPv4 headers
  * with no options. */
 
-static __always_inline void ipv4_csum(struct iphdr *iph) {
+static __always_inline void ipv4_csum(struct iphdr *iph)
+{
     __u32 csum;
 
     iph->check = 0;

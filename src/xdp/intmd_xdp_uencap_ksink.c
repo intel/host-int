@@ -13,11 +13,29 @@
 #include "intbpf.h"
 #include "intmd_headers.h"
 #include "kutils.h"
-
 #include "parsing_helpers.h"
 #include "rewrite_helpers.h"
 
-#define PROG_NAME "intmd_xdp_ksink"
+#define PROG_NAME "intmd_xdp_uencap_ksink"
+
+struct temp_space_data_t {
+    struct ethhdr eth_cpy;
+    struct iphdr iph_cpy;
+};
+
+/* temp_space_map is only intended to temporarily store data while
+ * processing a single packet that does not easily fit on the 512-byte
+ * call stack.  The only possible reason to access it from a user
+ * space program would be for debugging, but even then there would be
+ * no way to get a consistent snapshot of the value 'between packets',
+ * or at any other desired point in time, from a user space
+ * program. */
+struct bpf_map_def SEC("maps") temp_space_map = {
+    .type = BPF_MAP_TYPE_PERCPU_ARRAY,
+    .key_size = sizeof(__u32),
+    .value_size = sizeof(struct temp_space_data_t),
+    .max_entries = 1,
+};
 
 struct bpf_map_def SEC("maps") sink_event_perf_map = {
     .type = BPF_MAP_TYPE_PERF_EVENT_ARRAY,
@@ -56,19 +74,19 @@ int sink_func(struct xdp_md *ctx)
     struct iphdr *iph;
     struct udphdr *udph;
     struct tcphdr *tcph;
-    const __u16 int_hdr_len_without_tail_hdr =
-        (sizeof(struct int_shim_hdr) + sizeof(struct int_metadata_hdr) +
-         sizeof(struct int_metadata_entry) + sizeof(__u32));
+
     const __u16 int_hdr_len =
-        (int_hdr_len_without_tail_hdr + sizeof(struct int_tail_hdr));
+        (sizeof(struct int_shim_hdr) + sizeof(struct int_metadata_hdr) +
+         sizeof(struct int_metadata_entry) + sizeof(__u32) +
+         sizeof(struct int_tail_hdr));
+    const __u16 total_int_len_with_int_udp =
+        (sizeof(struct udphdr) + int_hdr_len);
 
     struct int_shim_hdr *intshimh;
     struct int_metadata_hdr *intmdh;
     struct int_metadata_entry *intmdsrc;
     struct int_tail_hdr *tail_hdr;
-
     __u32 *seq_num;
-    __u32 csum = 0;
 
     void *data_end = (void *)(long)ctx->data_end;
     void *data = (void *)(long)ctx->data;
@@ -123,44 +141,71 @@ int sink_func(struct xdp_md *ctx)
         goto out;
     }
 
-    cfg_key = CONFIG_MAP_KEY_DSCP_VAL;
-    __u32 *dscp_val_ptr = bpf_map_lookup_elem(&sink_config_map, &cfg_key);
-    cfg_key = CONFIG_MAP_KEY_DSCP_MASK;
-    __u32 *dscp_mask_ptr = bpf_map_lookup_elem(&sink_config_map, &cfg_key);
-    __u8 dscp_val = DEFAULT_INT_DSCP_VAL;
-    __u8 dscp_mask = DEFAULT_INT_DSCP_MASK;
-    if (dscp_val_ptr != NULL && dscp_mask_ptr != NULL) {
-        dscp_val = *dscp_val_ptr;
-        dscp_mask = *dscp_mask_ptr;
-    }
-
-    if ((iph->tos & dscp_mask) != (dscp_val & dscp_mask)) {
-        // No bpf_printk here, since receiving IPv4 packets
-        // with DSCP indicating no INT header is perfectly
-        // normal if source host was configured not to add an
-        // INT header to the packet.
+    if ((bpf_ntohs(iph->frag_off) & IPV4_FRAG_OFFSET_MASK) != 0) {
+        bpf_printk(PROG_NAME " Not a first IPv4 fragment packet");
         goto out;
     }
 
-    if ((bpf_ntohs(iph->frag_off) & IPV4_FRAG_OFFSET_MASK) != 0) {
-        bpf_printk(PROG_NAME " Not a first IPv4 fragment packet");
+    if (ip_type != IPPROTO_UDP) {
+        /* No bpf_printk here, since receiving packets with no INT
+         * header is perfectly normal in many networks. */
+#define SEQNUM_DEBUG
+#ifdef SEQNUM_DEBUG
+        bpf_printk(PROG_NAME " proto %u ipv4.id %u len %u\n", iph->protocol,
+                   bpf_ntohs(iph->id), bpf_ntohs(iph->tot_len));
+#endif // SEQNUM_DEBUG
+        goto out;
+    }
+    if (parse_udphdr(&nh, data_end, &udph) < 0) {
+        bpf_printk(PROG_NAME " Dropping received"
+                             " Ethernet+IPv4 packet with proto=UDP, but"
+                             " it was too short to contain a full UDP"
+                             " header, or its UDP length was less than 8"
+                             " (data_end-data)=%d\n",
+                   data_end - data);
+        action = XDP_DROP;
+        goto out;
+    }
+    /* Check if UDP dest port indicates that an INT header
+     * follows. */
+    cfg_key = CONFIG_MAP_KEY_INT_UDP_ENCAP_DEST_PORT;
+    __u32 *cfg_val_ptr;
+    __u16 int_udp_dest_port;
+    cfg_val_ptr = bpf_map_lookup_elem(&sink_config_map, &cfg_key);
+    if (cfg_val_ptr != NULL) {
+        int_udp_dest_port = (__be16)*cfg_val_ptr;
+    } else {
+        int_udp_dest_port = bpf_htons(DEFAULT_INT_UDP_DEST_PORT);
+    }
+    if (udph->dest != int_udp_dest_port) {
+        /* No INT header follows the UDP header.  Send the packet
+         * onwards without modifying it. */
+#ifdef SEQNUM_DEBUG
+        bpf_printk(PROG_NAME " non-INT UDP ipv4.id %u len %u dport %u\n",
+                   bpf_ntohs(iph->id), bpf_ntohs(iph->tot_len),
+                   bpf_ntohs(udph->dest));
+#endif // SEQNUM_DEBUG
         goto out;
     }
 
     struct flow_key key = {};
     key.saddr = iph->saddr;
     key.daddr = iph->daddr;
-    key.proto = iph->protocol;
 
+    __u32 temp_space_key = 0;
+    struct temp_space_data_t *temp_space =
+        bpf_map_lookup_elem(&temp_space_map, &temp_space_key);
+    if (temp_space == NULL) {
+        /* This is completely unexpected for an array map.  It should
+         * never happen. */
+        bpf_printk(PROG_NAME " Lookup of key 0 in temp space map returned NULL."
+                             "  Dropping packet.\n");
+        action = XDP_DROP;
+        goto out;
+    }
     /* First copy the original eth and ip headers */
-    struct ethhdr eth_cpy;
-    __builtin_memcpy(&eth_cpy, eth, sizeof(eth_cpy));
-
-    struct iphdr iph_cpy;
-    __builtin_memcpy(&iph_cpy, iph, sizeof(iph_cpy));
-
-    struct udphdr udph_cpy = {};
-    struct tcphdr tcph_cpy = {};
+    __builtin_memcpy(&(temp_space->eth_cpy), eth, sizeof(struct ethhdr));
+    __builtin_memcpy(&(temp_space->iph_cpy), iph, sizeof(struct iphdr));
 
     __u32 sink_node_id = DEFAULT_SINK_NODE_ID;
     __u32 pkt_seq_num = 0;
@@ -173,108 +218,89 @@ int sink_func(struct xdp_md *ctx)
         sink_node_id = *node_id;
     }
 
-    if (ip_type == IPPROTO_UDP) {
+    if (parse_int_md_hdr(&nh, data_end, &intshimh, &intmdh, &intmdsrc, &seq_num,
+                         &tail_hdr) < 0) {
+        bpf_printk(PROG_NAME " Dropping received"
+                             " Ethernet+IPv4+UDP packet too short"
+                             " to contain INT headers"
+                             " (data_end-data)=%d\n",
+                   data_end - data);
+        action = XDP_DROP;
+        goto out;
+    }
+    key.proto = tail_hdr->proto;
+    pkt_seq_num = bpf_ntohl(*seq_num);
+    if (tail_hdr->proto == IPPROTO_UDP) {
         if (parse_udphdr(&nh, data_end, &udph) < 0) {
-            bpf_printk(PROG_NAME " Dropping received"
-                                 " Ethernet+IPv4 packet with proto=UDP, but"
-                                 " it was too short to contain a full UDP"
-                                 " header, or its UDP length was less than 8"
-                                 " (data_end-data)=%d\n",
-                       data_end - data);
+            bpf_printk(PROG_NAME
+                       " Dropping received"
+                       " Ethernet+IPv4+UDP packet with dest port %u"
+                       " indicating INT header follows, original"
+                       " IPv4 proto in INT tail header %u indicating UDP"
+                       " follows, but it was too short to contain a full"
+                       " UDP header, or its UDP length was less than 8"
+                       " (data_end-data)=%d\n",
+                       bpf_ntohs(udph->dest), tail_hdr->proto, data_end - data);
             action = XDP_DROP;
             goto out;
         }
         key.sport = udph->source;
         key.dport = udph->dest;
-
-        if (parse_int_md_hdr(&nh, data_end, &intshimh, &intmdh, &intmdsrc,
-                             &seq_num, &tail_hdr) < 0) {
-            bpf_printk(PROG_NAME " Dropping received"
-                                 " Ethernet+IPv4+UDP packet whose DSCP"
-                                 " indicated it should"
-                                 " contain INT headers, but it was too short"
-                                 " to contain INT headers"
-                                 " (data_end-data)=%d\n",
-                       data_end - data);
-            action = XDP_DROP;
-            goto out;
-        }
-
-        __builtin_memcpy(&udph_cpy, udph, sizeof(udph_cpy));
-
-        pkt_seq_num = bpf_ntohl(*seq_num);
-        csum = (__u32)(~udph->check);
-        void *int_data = (data + sizeof(struct ethhdr) + sizeof(struct iphdr) +
-                          sizeof(struct udphdr));
-        if ((int_data + int_hdr_len) > data_end) {
-            goto out;
-        }
-        /* Note 2: We expect the last 4-byte reserved field at the end
-         * of the INT header might be modified in the source host,
-         * after source EBPF code added the INT header.  The source
-         * EBPF code adjusted the TCP/UDP checksum when this reserved
-         * field was 0, so here we can skip making any adjustments for
-         * the reserved field. That is why the next line uses
-         * int_hdr_len_without_last_reserved_field instead of
-         * int_hdr_len. */
-        csum = bpf_csum_diff(int_data, int_hdr_len_without_tail_hdr, NULL, 0,
-                             csum);
-
-    } else if (ip_type == IPPROTO_TCP) {
+    } else if (tail_hdr->proto == IPPROTO_TCP) {
         if (parse_tcphdr(&nh, data_end, &tcph) < 0) {
-            bpf_printk(PROG_NAME " Dropping received"
-                                 " Ethernet+IPv4 packet with proto=TCP, but"
-                                 " it was too short to contain a full"
-                                 " TCP header"
-                                 " (data_end-data)=%d\n",
-                       data_end - data);
+            bpf_printk(PROG_NAME
+                       " Dropping received"
+                       " Ethernet+IPv4+UDP packet with dest port %u"
+                       " indicating INT header follows, original"
+                       " IPv4 proto in INT tail header %u indicating TCP"
+                       " follows, but it was too short to contain a full"
+                       " TCP header plus TCP options"
+                       " (data_end-data)=%d\n",
+                       bpf_ntohs(udph->dest), tail_hdr->proto, data_end - data);
             action = XDP_DROP;
             goto out;
         }
         key.sport = tcph->source;
         key.dport = tcph->dest;
-        csum = (__u32)(~tcph->check);
+    } else {
+        bpf_printk(PROG_NAME " Dropping received"
+                             " Ethernet+IPv4+UDP packet with dest port %u"
+                             " indicating INT header follows, but original"
+                             " IPv4 proto in INT tail header %u that is neither"
+                             " TCP nor UDP\n",
+                   bpf_ntohs(udph->dest), tail_hdr->proto);
+        action = XDP_DROP;
+        goto out;
+    }
 
-        __builtin_memcpy(&tcph_cpy, tcph, sizeof(tcph_cpy));
-
-        if (parse_int_md_hdr(&nh, data_end, &intshimh, &intmdh, &intmdsrc,
-                             &seq_num, &tail_hdr) < 0) {
-            bpf_printk(PROG_NAME " Dropping received"
-                                 " Ethernet_IPv4+TCP"
-                                 " packet whose DSCP indicated it should"
-                                 " contain INT headers, but it was too short"
-                                 " to contain INT headers"
-                                 " (data_end-data)=%d\n",
-                       data_end - data);
+#define SIMULATE_NIC_RX_PACKET_DROPS
+#ifdef SIMULATE_NIC_RX_PACKET_DROPS
+    /* The only purpose of this code is to simulate the receiving
+     * host's NIC dropping a fraction of packets on particular flows.
+     * It is for demonstration purposes only. */
+#define UDP_DEST_PORT_THAT_DROPS_SOME_PKTS 10001
+    if ((tail_hdr->proto == IPPROTO_UDP) &&
+        (key.dport == bpf_htons(UDP_DEST_PORT_THAT_DROPS_SOME_PKTS))) {
+        /* Select approximately 10% of these packets to drop.  We
+         * could do it by parsing the INT header and seeing if the
+         * sequence number is a multiple of 10.  I am hoping that this
+         * approach based upon the current time in the sink host
+         * should also work reasonably. */
+        __u32 tmp = (__u32)curr_ts;
+        __u32 hash = ((tmp & 0x1f) ^ ((tmp >> 5) & 0x1f) ^
+                      ((tmp >> 10) & 0x1f) ^ ((tmp >> 15) & 0x1f));
+        if (hash < 3) {
             action = XDP_DROP;
             goto out;
         }
-
-        pkt_seq_num = bpf_ntohl(*seq_num);
-        void *int_data = data + sizeof(struct ethhdr) + sizeof(struct iphdr) +
-                         sizeof(struct tcphdr);
-        if ((int_data + int_hdr_len) > data_end) {
-            goto out;
-        }
-        /* See Note 2 */
-        csum = bpf_csum_diff(int_data, int_hdr_len_without_tail_hdr, NULL, 0,
-                             csum);
-#ifdef EXTRA_DEBUG
-        debug_print_ipv4_header(iph);
-        debug_print_tcp_header(tcph);
-        debug_print_int_headers(int_data, data_end);
-#endif
-    } else {
-        // No bpf_printk here, since receiving packets that
-        // are neither TCP nor UDP is perfectly normal in many
-        // networks.
-        goto out;
     }
+#endif
 
     __u32 e2e_latency_ns = ((__u32)curr_ts - bpf_ntohl(intmdsrc->ingress_ts));
 #ifdef EXTRA_DEBUG
     bpf_printk(PROG_NAME " e2e_latency_ns: %u\n", e2e_latency_ns);
 #endif
+
     cfg_key = LATENCY_MAP_KEY_LATENCY_BUCKET;
 
     struct latency_bucket_entries *latency_bucket_value =
@@ -293,7 +319,13 @@ int sink_func(struct xdp_md *ctx)
     __u64 latency_bucket_ns =
         e2e_latency_bucket(e2e_latency_ns, latency_bucket_value);
 
-#ifdef EXTRA_DEBUG
+#ifdef SEQNUM_DEBUG
+    bpf_printk(PROG_NAME " INT UDP ipv4.id %u len %u seqnum %u\n",
+               bpf_ntohs(iph->id), bpf_ntohs(iph->tot_len), pkt_seq_num);
+#endif // SEQNUM_DEBUG
+
+#undef FLOW_DEBUG
+#ifdef FLOW_DEBUG
     char buf[SPRINTF_FLOW_KEY_HEX_BUF_SIZE];
     sprintf_flow_key_hex(buf, &key);
 #endif
@@ -319,7 +351,7 @@ int sink_func(struct xdp_md *ctx)
         if (ret < 0) {
             // See Note 1 in intmd_tc_ksource.c
             generate_int_report = FALSE;
-#ifdef EXTRA_DEBUG
+#ifdef FLOW_DEBUG
             bpf_printk(PROG_NAME " failed (%d) adding new entry key=%s\n", ret,
                        buf);
 #endif
@@ -327,7 +359,7 @@ int sink_func(struct xdp_md *ctx)
             /* Generate INT latency report for first packet of
              * flow. */
             generate_int_report = TRUE;
-#ifdef EXTRA_DEBUG
+#ifdef FLOW_DEBUG
             bpf_printk(PROG_NAME " new entry key=%s\n", buf);
 #endif
         }
@@ -391,13 +423,18 @@ int sink_func(struct xdp_md *ctx)
                               &sink_event_perf_map, &intmdsink, NULL, NULL,
                               NULL);
     }
-
+    cfg_key = CONFIG_MAP_KEY_DROP_PACKET;
+    char *sink_type = bpf_map_lookup_elem(&sink_config_map, &cfg_key);
+    if (sink_type != NULL) {
+        action = XDP_DROP;
+        goto out;
+    }
     // remove INT headers
-    int ret = bpf_xdp_adjust_head(ctx, int_hdr_len);
+    int ret = bpf_xdp_adjust_head(ctx, total_int_len_with_int_udp);
     if (ret < 0) {
         bpf_printk(PROG_NAME " bpf_xdp_adjust_head by %d"
                              " failed (%d)\n",
-                   int_hdr_len, ret);
+                   total_int_len_with_int_udp, ret);
         action = XDP_DROP;
         goto out;
     }
@@ -415,7 +452,7 @@ int sink_func(struct xdp_md *ctx)
         action = XDP_DROP;
         goto out;
     }
-    __builtin_memcpy(eth, &eth_cpy, sizeof(*eth));
+    __builtin_memcpy(eth, &(temp_space->eth_cpy), sizeof(struct ethhdr));
 
     iph = (struct iphdr *)(void *)(eth + 1);
     if ((void *)(iph + 1) > data_end) {
@@ -428,68 +465,12 @@ int sink_func(struct xdp_md *ctx)
         action = XDP_DROP;
         goto out;
     }
-    __builtin_memcpy(iph, &iph_cpy, sizeof(*iph));
+    __builtin_memcpy(iph, &(temp_space->iph_cpy), sizeof(struct iphdr));
     __u16 ip_oldlen = bpf_ntohs(iph->tot_len);
-    __u16 ip_newlen = ip_oldlen - int_hdr_len;
+    __u16 ip_newlen = ip_oldlen - total_int_len_with_int_udp;
     iph->tot_len = bpf_htons(ip_newlen);
-#ifdef EXTRA_DEBUG
-    bpf_printk(PROG_NAME " old ip len: %d, new ip len: %d\n", ip_oldlen,
-               ip_newlen);
-#endif
-
-    // Restore DSCP value.
-    // TODO: Check whether INT source should be preserving the
-    // original DSCP value in some INT header field, and here we
-    // should be copying it from that field to the IPv4 header.
-    iph->tos = iph->tos & ~dscp_mask;
+    iph->protocol = key.proto;
     ipv4_csum(iph);
-
-    __u32 payload_oldlen = (__u32)bpf_htons(ip_oldlen - sizeof(struct iphdr));
-    __u32 payload_newlen = (__u32)bpf_htons(ip_newlen - sizeof(struct iphdr));
-    if (ip_type == IPPROTO_UDP) {
-        // update UDP len
-        udph = (struct udphdr *)(void *)(iph + 1);
-        if ((void *)(udph + 1) > data_end) {
-            bpf_printk(PROG_NAME " Dropping packet that parsed"
-                                 " as full packet before bpf_xdp_adjust_head"
-                                 " but did not contain complete UDP header"
-                                 " afterwards"
-                                 " (data_end-data)=%d\n",
-                       data_end - data);
-            action = XDP_DROP;
-            goto out;
-        }
-        __builtin_memcpy(udph, &udph_cpy, sizeof(*udph));
-        udph->len = payload_newlen;
-
-        // Adjust UDP length once for UDP length in UDP
-        // header, and another time for UDP length in UDP
-        // pseudo-header.
-        csum = bpf_csum_diff(&payload_oldlen, 4, NULL, 0, csum);
-        csum = bpf_csum_diff(NULL, 0, &payload_newlen, 4, csum);
-        csum = bpf_csum_diff(&payload_oldlen, 4, NULL, 0, csum);
-        csum = bpf_csum_diff(NULL, 0, &payload_newlen, 4, csum);
-        csum = csum_fold_helper(csum);
-        udph->check = csum;
-    } else if (ip_type == IPPROTO_TCP) {
-        tcph = (struct tcphdr *)(void *)(iph + 1);
-        if ((void *)(tcph + 1) > data_end) {
-            bpf_printk(PROG_NAME " Dropping packet that parsed"
-                                 " as full packet before bpf_xdp_adjust_head"
-                                 " but did not contain complete TCP header"
-                                 " afterwards"
-                                 " (data_end-data)=%d\n",
-                       data_end - data);
-            action = XDP_DROP;
-            goto out;
-        }
-        __builtin_memcpy(tcph, &tcph_cpy, sizeof(*tcph));
-
-        csum = bpf_csum_diff(&payload_oldlen, 4, NULL, 0, csum);
-        csum = bpf_csum_diff(NULL, 0, &payload_newlen, 4, csum);
-        csum = csum_fold_helper(csum);
-        tcph->check = csum;
-    }
 
 out:
     return action;

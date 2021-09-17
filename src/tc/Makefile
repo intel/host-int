@@ -5,13 +5,14 @@
 #  similar to kernel/samples/bpf/
 include ../Makefile.variable
 
-TARGET := intmd_tc_ksource
+TARGETS += intmd_tc_ksource
+TARGETS += intmd_tc_uencap_ksource
 
 # Linking with libbpf and libpcap
 #TARGETS_PCAP += xdp_tcpdump
 
 # Generate file name-scheme based on TARGETS
-KERN_SOURCES = ${TARGET:=.c}
+KERN_SOURCES = ${TARGETS:=.c}
 KERN_OBJECTS = ${KERN_SOURCES:.c=.o}
 
 ARCH ?= x86

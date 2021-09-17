@@ -17,6 +17,8 @@
 #include "parsing_helpers.h"
 #include "rewrite_helpers.h"
 
+#define PROG_NAME "intmd_xdp_ksource"
+
 struct bpf_map_def SEC("maps") src_flow_stats_map = {
     .type = BPF_MAP_TYPE_HASH,
     .key_size = sizeof(struct flow_key),
@@ -39,7 +41,8 @@ struct bpf_map_def SEC("maps") src_dest_ipv4_filter_map = {
 };
 
 SEC("xdp")
-int source_func(struct xdp_md *ctx) {
+int source_func(struct xdp_md *ctx)
+{
     int action = XDP_PASS;
     void *data_end = (void *)(long)ctx->data_end;
     void *data = (void *)(long)ctx->data;
@@ -49,28 +52,35 @@ int source_func(struct xdp_md *ctx) {
     if (time_offset != NULL) {
         curr_ts += *time_offset;
 #ifdef EXTRA_DEBUG
-        bpf_printk("Adjusted time with offset %u\n", time_offset);
+        bpf_printk(PROG_NAME " Adjusted time with offset %u\n", *time_offset);
 #endif
+    } else {
+        bpf_printk(PROG_NAME " time_offset is NULL\n");
     }
     __u32 src_ts_ns = bpf_htonl((__u32)curr_ts);
     __u16 ingress_port = (__u16)(ctx->ingress_ifindex);
-    __u32 extra_bytes = 0;
+    const int int_hdr_len =
+        (sizeof(struct int_shim_hdr) + sizeof(struct int_metadata_hdr) +
+         sizeof(struct int_metadata_entry) + sizeof(__u32) +
+         sizeof(struct int_tail_hdr));
 
     struct udphdr udph_cpy = {};
     struct tcphdr tcph_cpy = {};
 
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end) {
-        bpf_printk("intmd_xdp_ksource Dropping received packet that did not"
+        bpf_printk(PROG_NAME
+                   " Dropping received packet that did not"
                    " contain full Ethernet header (data_end-data)=%d\n",
                    data_end - data);
-        action = XDP_ABORTED;
+        action = XDP_DROP;
         goto out;
     }
 
 #ifdef EXTRA_DEBUG
     __u32 dbg_ts = (__u32)curr_ts;
-    bpf_printk("%u: intmd_xdp_ksource dsz=(data_end-data)=%d eth proto=0x%x\n",
+    bpf_printk(PROG_NAME "%u: intmd_xdp_ksource dsz=(data_end-data)=%d"
+                         " eth proto=0x%x\n",
                dbg_ts, data_end - data, bpf_ntohs(eth->h_proto));
 #endif
     if (eth->h_proto != bpf_htons(ETH_P_IP)) {
@@ -82,12 +92,12 @@ int source_func(struct xdp_md *ctx) {
     /* Get IP header */
     struct iphdr *iph = (struct iphdr *)(void *)(eth + 1);
     if ((void *)(iph + 1) > data_end) {
-        bpf_printk("intmd_xdp_ksource Dropping received Ethernet packet"
-                   " with proto=0x%x indicating IPv4, but it"
-                   " did not contain full IPv4 header"
-                   " (data_end-data)=%d\n",
+        bpf_printk(PROG_NAME " Dropping received Ethernet packet"
+                             " with proto=0x%x indicating IPv4, but it"
+                             " did not contain full IPv4 header"
+                             " (data_end-data)=%d\n",
                    bpf_ntohs(eth->h_proto), data_end - data);
-        action = XDP_ABORTED;
+        action = XDP_DROP;
         goto out;
     }
 
@@ -102,8 +112,8 @@ int source_func(struct xdp_md *ctx) {
 #ifdef EXTRA_DEBUG
         /* Only enable this tracing for extra debug, because it could
          * be most packets that take this branch. */
-        bpf_printk("intmd_xdp_ksource Dest IPv4 address 0x%x is not in"
-                   " destination filter map\n",
+        bpf_printk(PROG_NAME " Dest IPv4 address 0x%x is not in"
+                             " destination filter map\n",
                    bpf_ntohl(iph->daddr));
 #endif
         goto out;
@@ -129,9 +139,9 @@ int source_func(struct xdp_md *ctx) {
 #ifdef EXTRA_DEBUG
     {
         __u16 tot_len = bpf_ntohs(iph->tot_len);
-        bpf_printk("%u: proto=%d ip_tot_len=%d\n", dbg_ts, iph->protocol,
-                   tot_len);
-        bpf_printk("%u: id=0x%x (eth+iplen)-dsz=%d\n", dbg_ts,
+        bpf_printk(PROG_NAME " %u: proto=%d ip_tot_len=%d\n", dbg_ts,
+                   iph->protocol, tot_len);
+        bpf_printk(PROG_NAME "%u: id=0x%x (eth+iplen)-dsz=%d\n", dbg_ts,
                    bpf_ntohs(iph->id),
                    (sizeof(struct ethhdr) + tot_len) - (data_end - data));
     }
@@ -139,39 +149,41 @@ int source_func(struct xdp_md *ctx) {
     if (iph->protocol == IPPROTO_TCP) {
         struct tcphdr *tcph = (struct tcphdr *)(void *)(iph + 1);
         if (tcph + 1 > data_end) {
-            bpf_printk("intmd_xdp_ksource Dropping received Ethernet+IPv4"
-                       " packet with proto=TCP, but it was too"
-                       " short to contain a full TCP header"
-                       " (data_end-data)=%d\n",
+            bpf_printk(PROG_NAME " Dropping received Ethernet+IPv4"
+                                 " packet with proto=TCP, but it was too"
+                                 " short to contain a full TCP header"
+                                 " (data_end-data)=%d\n",
                        data_end - data);
-            action = XDP_ABORTED;
+            action = XDP_DROP;
             goto out;
         }
         __builtin_memcpy(&tcph_cpy, tcph, sizeof(*tcph));
 
-        key.sport = bpf_ntohs(tcph->source);
-        key.dport = bpf_ntohs(tcph->dest);
+        key.sport = tcph->source;
+        key.dport = tcph->dest;
 #ifdef EXTRA_DEBUG
-        bpf_printk("[tcp]: %d->%d, %d\n", key.sport, key.dport, new_seq_num);
+        bpf_printk(PROG_NAME " [tcp]: %d->%d, %d\n", key.sport, key.dport,
+                   new_seq_num);
 #endif
     } else if (iph->protocol == IPPROTO_UDP) {
         struct udphdr *udph = (struct udphdr *)(void *)(iph + 1);
         if (udph + 1 > data_end) {
-            bpf_printk("intmd_xdp_ksource Dropping received Ethernet+IPv4"
-                       " packet with proto=UDP, but it was too"
-                       " short to contain a full UDP header"
-                       " (data_end-data)=%d\n",
+            bpf_printk(PROG_NAME " Dropping received Ethernet+IPv4"
+                                 " packet with proto=UDP, but it was too"
+                                 " short to contain a full UDP header"
+                                 " (data_end-data)=%d\n",
                        data_end - data);
-            action = XDP_ABORTED;
+            action = XDP_DROP;
             goto out;
         }
         __builtin_memcpy(&udph_cpy, udph, sizeof(*udph));
-        key.sport = bpf_ntohs(udph->source);
-        key.dport = bpf_ntohs(udph->dest);
+        key.sport = udph->source;
+        key.dport = udph->dest;
         udp_length = (__u32)(udph->len);
         csum = (__u32)(~udph->check);
 #ifdef EXTRA_DEBUG
-        bpf_printk("[udp]: %d->%d, %d\n", key.sport, key.dport, new_seq_num);
+        bpf_printk(PROG_NAME " [udp]: %d->%d, %d\n", key.sport, key.dport,
+                   new_seq_num);
 #endif
     } else {
         // No bpf_printk here, since receiving packets that are
@@ -199,14 +211,11 @@ int source_func(struct xdp_md *ctx) {
 
     /* Then add space in front of the packet */
 
-    const int int_hdr_len =
-        (sizeof(struct int_shim_hdr) + sizeof(struct int_metadata_hdr) +
-         sizeof(struct int_metadata_entry) + sizeof(__u32) + sizeof(__u32));
     int ret = bpf_xdp_adjust_head(ctx, 0 - int_hdr_len);
     if (ret) {
-        bpf_printk("intmd_xdp_ksource bpf_xdp_adjust_head by %d failed (%d)\n",
+        bpf_printk(PROG_NAME " bpf_xdp_adjust_head by %d failed (%d)\n",
                    0 - int_hdr_len, ret);
-        action = XDP_ABORTED;
+        action = XDP_DROP;
         goto out;
     }
     data_end = (void *)(long)ctx->data_end;
@@ -214,26 +223,26 @@ int source_func(struct xdp_md *ctx) {
 
     eth = data;
     if ((void *)(eth + 1) > data_end) {
-        bpf_printk("intmd_xdp_ksource Dropping packet that parsed as"
-                   " full packet before bpf_xdp_adjust_head"
-                   " but did not contain complete Ethernet header"
-                   " afterwards"
-                   " (data_end-data)=%d\n",
+        bpf_printk(PROG_NAME " Dropping packet that parsed as"
+                             " full packet before bpf_xdp_adjust_head"
+                             " but did not contain complete Ethernet header"
+                             " afterwards"
+                             " (data_end-data)=%d\n",
                    data_end - data);
-        action = XDP_ABORTED;
+        action = XDP_DROP;
         goto out;
     }
     __builtin_memcpy(eth, &eth_cpy, sizeof(*eth));
 
     iph = (struct iphdr *)(void *)(eth + 1);
     if ((void *)(iph + 1) > data_end) {
-        bpf_printk("intmd_xdp_ksource Dropping packet that parsed as"
-                   " full packet before bpf_xdp_adjust_head"
-                   " but did not contain complete IPv4 header"
-                   " afterwards"
-                   " (data_end-data)=%d\n",
+        bpf_printk(PROG_NAME " Dropping packet that parsed as"
+                             " full packet before bpf_xdp_adjust_head"
+                             " but did not contain complete IPv4 header"
+                             " afterwards"
+                             " (data_end-data)=%d\n",
                    data_end - data);
-        action = XDP_ABORTED;
+        action = XDP_DROP;
         goto out;
     }
     __builtin_memcpy(iph, &iph_cpy, sizeof(*iph));
@@ -243,13 +252,13 @@ int source_func(struct xdp_md *ctx) {
     if (iph_cpy.protocol == IPPROTO_TCP) {
         struct tcphdr *tcph = (struct tcphdr *)(void *)(iph + 1);
         if ((void *)(tcph + 1) > data_end) {
-            bpf_printk("intmd_xdp_ksource Dropping packet that parsed as"
-                       " full packet before bpf_xdp_adjust_head"
-                       " but did not contain complete TCP header"
-                       " afterwards"
-                       " (data_end-data)=%d\n",
+            bpf_printk(PROG_NAME " Dropping packet that parsed as"
+                                 " full packet before bpf_xdp_adjust_head"
+                                 " but did not contain complete TCP header"
+                                 " afterwards"
+                                 " (data_end-data)=%d\n",
                        data_end - data);
-            action = XDP_ABORTED;
+            action = XDP_DROP;
             goto out;
         }
         __builtin_memcpy(tcph, &tcph_cpy, sizeof(*tcph));
@@ -258,13 +267,13 @@ int source_func(struct xdp_md *ctx) {
     } else {
         struct udphdr *udph = (struct udphdr *)(void *)(iph + 1);
         if ((void *)(udph + 1) > data_end) {
-            bpf_printk("intmd_xdp_ksource Dropping packet that parsed as"
-                       " full packet before bpf_xdp_adjust_head"
-                       " but did not contain complete UDP header"
-                       " afterwards"
-                       " (data_end-data)=%d\n",
+            bpf_printk(PROG_NAME " Dropping packet that parsed as"
+                                 " full packet before bpf_xdp_adjust_head"
+                                 " but did not contain complete UDP header"
+                                 " afterwards"
+                                 " (data_end-data)=%d\n",
                        data_end - data);
-            action = XDP_ABORTED;
+            action = XDP_DROP;
             goto out;
         }
         __builtin_memcpy(udph, &udph_cpy, sizeof(*udph));
@@ -272,12 +281,12 @@ int source_func(struct xdp_md *ctx) {
         inthdr = (struct int_shim_hdr *)(void *)(udph + 1);
     }
     if ((void *)(inthdr + 1) > data_end) {
-        bpf_printk("intmd_xdp_ksource Dropping packet that does not have enough"
-                   " space for inthdr after increasing its size using"
-                   " bpf_xdp_adjust_head"
-                   " (data_end-data)=%d\n",
+        bpf_printk(PROG_NAME " Dropping packet that does not have enough"
+                             " space for inthdr after increasing its size using"
+                             " bpf_xdp_adjust_head"
+                             " (data_end-data)=%d\n",
                    data_end - data);
-        action = XDP_ABORTED;
+        action = XDP_DROP;
         goto out;
     }
     inthdr->type = INT_TYPE_NON_STANDARD_INCLUDES_SEQUENCE_NUMBER;
@@ -288,12 +297,12 @@ int source_func(struct xdp_md *ctx) {
     struct int_metadata_hdr *mdhdr;
     mdhdr = (struct int_metadata_hdr *)(void *)(inthdr + 1);
     if ((void *)(mdhdr + 1) > data_end) {
-        bpf_printk("intmd_xdp_ksource Dropping packet that does not have enough"
-                   " space for mdhdr after increasing its size using"
-                   " bpf_xdp_adjust_head"
-                   " (data_end-data)=%d\n",
+        bpf_printk(PROG_NAME " Dropping packet that does not have enough"
+                             " space for mdhdr after increasing its size using"
+                             " bpf_xdp_adjust_head"
+                             " (data_end-data)=%d\n",
                    data_end - data);
-        action = XDP_ABORTED;
+        action = XDP_DROP;
         goto out;
     }
     mdhdr->ver = 0;
@@ -310,12 +319,13 @@ int source_func(struct xdp_md *ctx) {
     struct int_metadata_entry *mdentry;
     mdentry = (struct int_metadata_entry *)(void *)(mdhdr + 1);
     if ((void *)(mdentry + 1) > data_end) {
-        bpf_printk("intmd_xdp_ksource Dropping packet that does not have enough"
+        bpf_printk(PROG_NAME
+                   " Dropping packet that does not have enough"
                    " space for mdentry after increasing its size using"
                    " bpf_xdp_adjust_head"
                    " (data_end-data)=%d\n",
                    data_end - data);
-        action = XDP_ABORTED;
+        action = XDP_DROP;
         goto out;
     }
 
@@ -337,28 +347,34 @@ int source_func(struct xdp_md *ctx) {
 
     __u32 *seq_num = (__u32 *)(void *)(mdentry + 1);
     if ((void *)(seq_num + 1) > data_end) {
-        bpf_printk("intmd_xdp_ksource Dropping packet that does not have enough"
+        bpf_printk(PROG_NAME
+                   " Dropping packet that does not have enough"
                    " space for seq_num after increasing its size using"
                    " bpf_xdp_adjust_head"
                    " (data_end-data)=%d\n",
                    data_end - data);
-        action = XDP_ABORTED;
+        action = XDP_DROP;
         goto out;
     }
     new_seq_num = bpf_htonl(new_seq_num);
     __builtin_memcpy(seq_num, &new_seq_num, sizeof(__u32));
 
-    __u32 *e_bytes = (__u32 *)(void *)(seq_num + 1);
-    if ((void *)(e_bytes + 1) > data_end) {
-        bpf_printk("intmd_xdp_ksource Dropping packet that does not have enough"
+    struct int_tail_hdr *tailhdr;
+    tailhdr = (struct int_tail_hdr *)(void *)(seq_num + 1);
+    if ((void *)(tailhdr + 1) > data_end) {
+        bpf_printk(PROG_NAME
+                   " Dropping packet that does not have enough"
                    " space for e_bytes after increasing its size using"
                    " bpf_xdp_adjust_head"
                    " (data_end-data)=%d\n",
                    data_end - data);
-        action = XDP_ABORTED;
+        action = XDP_DROP;
         goto out;
     }
-    __builtin_memcpy(e_bytes, &extra_bytes, sizeof(__u32));
+    tailhdr->proto = 0;
+    tailhdr->dest_port_lo = 0;
+    tailhdr->dest_port_hi = 0;
+    tailhdr->reserved = 0;
 
     const __u16 int_hdr_minus_iphdr_len =
         (__u16)int_hdr_len - sizeof(struct iphdr);
@@ -382,30 +398,28 @@ int source_func(struct xdp_md *ctx) {
     if (iph->protocol == IPPROTO_UDP) {
         struct udphdr *udph = (struct udphdr *)(void *)(iph + 1);
         if (udph + 1 > data_end) {
-            bpf_printk("intmd_xdp_ksource Dropping packet that parsed as"
-                       " full packet before bpf_xdp_adjust_head"
-                       " but did not contain complete UDP header"
-                       " afterwards"
-                       " (data_end-data)=%d\n",
+            bpf_printk(PROG_NAME " Dropping packet that parsed as"
+                                 " full packet before bpf_xdp_adjust_head"
+                                 " but did not contain complete UDP header"
+                                 " afterwards"
+                                 " (data_end-data)=%d\n",
                        data_end - data);
-            action = XDP_ABORTED;
+            action = XDP_DROP;
             goto out;
         }
         udph->len = bpf_htons(iplen - sizeof(struct iphdr));
 #ifdef EXTRA_DEBUG
-        bpf_printk("%u: new udp len: %d\n", dbg_ts,
+        bpf_printk(PROG_NAME " %u: new udp len: %d\n", dbg_ts,
                    iplen - sizeof(struct iphdr));
 #endif
         __u32 len = (__u32)(udph->len);
         void *int_data = (data + sizeof(struct ethhdr) + sizeof(struct iphdr) +
                           sizeof(struct udphdr));
 
-        // TODO: Replace 32 with some value calculated from sum of
-        // sizeof() on appropriate INT headers.
-        if ((int_data + 32) > data_end) {
+        if ((int_data + int_hdr_len) > data_end) {
             goto out;
         }
-        csum = bpf_csum_diff(NULL, 0, int_data, 32, csum);
+        csum = bpf_csum_diff(NULL, 0, int_data, int_hdr_len, csum);
         csum = bpf_csum_diff(&udp_length, 4, NULL, 0, csum);
         csum = bpf_csum_diff(&udp_length, 4, NULL, 0, csum);
         csum = bpf_csum_diff(NULL, 0, &len, 4, csum);
@@ -416,13 +430,13 @@ int source_func(struct xdp_md *ctx) {
     } else {
         struct tcphdr *tcph = (struct tcphdr *)(void *)(iph + 1);
         if (tcph + 1 > data_end) {
-            bpf_printk("intmd_xdp_ksource Dropping packet that parsed as"
-                       " full packet before bpf_xdp_adjust_head"
-                       " but did not contain complete TCP header"
-                       " afterwards"
-                       " (data_end-data)=%d\n",
+            bpf_printk(PROG_NAME " Dropping packet that parsed as"
+                                 " full packet before bpf_xdp_adjust_head"
+                                 " but did not contain complete TCP header"
+                                 " afterwards"
+                                 " (data_end-data)=%d\n",
                        data_end - data);
-            action = XDP_ABORTED;
+            action = XDP_DROP;
             goto out;
         }
         tcph->check = 0;
@@ -436,10 +450,10 @@ int source_func(struct xdp_md *ctx) {
         csum = bpf_csum_diff(0, 0, &tmp, sizeof(__u32), csum);
         ret = variable_length_csum_diff((__u8 *)tcph, tcp_len, data_end, &csum);
         if (ret < 0) {
-            bpf_printk("intmd_xdp_ksource failed (%d) variable_length_csum_diff"
-                       " starting at offset %d with length %d\n",
+            bpf_printk(PROG_NAME " failed (%d) variable_length_csum_diff"
+                                 " starting at offset %d with length %d\n",
                        ret, (void *)tcph - data, tcp_len);
-            action = XDP_ABORTED;
+            action = XDP_DROP;
             goto out;
         }
         csum = csum_fold_helper(csum);

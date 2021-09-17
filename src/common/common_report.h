@@ -6,6 +6,7 @@
 
 #include "common_defines.h"
 #include "intmd_headers.h"
+#include "intbpf.h"
 
 int send_latency_report(char *server_name, __u32 server_addr, int server_port,
                         __u16 pkt_len, __u8 *pkt_data, int report_seq_num,
@@ -13,13 +14,15 @@ int send_latency_report(char *server_name, __u32 server_addr, int server_port,
 
 void print_latency_report(FILE *out, struct int_metadata_entry *source_data,
                           struct int_metadata_entry *sink_data,
-                          int report_seq_num, struct timespec *ts);
+                          int report_seq_num, struct timespec *ts,
+                          struct flow_key *key);
 
 int send_drop_report(char *server_name, __u32 server_addr, int server_port,
                      __u16 pkt_len, __u8 *pkt_data, int report_seq_num,
                      struct timespec *ts);
 
 void print_drop_report(FILE *out, struct int_drop_summary_data *data,
-                       int report_seq_num, struct timespec *ts);
+                       int report_seq_num, struct timespec *ts,
+                       struct flow_key *key);
 
 #endif /* __COMMON_REPORT_H */

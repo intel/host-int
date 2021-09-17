@@ -16,7 +16,8 @@
 
 #define MAX_ERRNO 4095
 
-int xdp_link_attach(int ifindex, __u32 xdp_flags, int prog_fd) {
+int xdp_link_attach(int ifindex, __u32 xdp_flags, int prog_fd)
+{
     int err;
 
     /* libbpf provide the XDP net_device link-level hook attach helper */
@@ -59,7 +60,8 @@ int xdp_link_attach(int ifindex, __u32 xdp_flags, int prog_fd) {
     return EXIT_OK;
 }
 
-int xdp_link_detach(int ifindex, __u32 xdp_flags, __u32 expected_prog_id) {
+int xdp_link_detach(int ifindex, __u32 xdp_flags, __u32 expected_prog_id)
+{
     __u32 curr_prog_id;
     int err;
 
@@ -92,7 +94,8 @@ int xdp_link_detach(int ifindex, __u32 xdp_flags, __u32 expected_prog_id) {
     return EXIT_OK;
 }
 
-struct bpf_object *load_bpf_object_file(const char *filename, int ifindex) {
+struct bpf_object *load_bpf_object_file(const char *filename, int ifindex)
+{
     int first_prog_fd = -1;
     struct bpf_object *obj;
     int err;
@@ -121,7 +124,8 @@ struct bpf_object *load_bpf_object_file(const char *filename, int ifindex) {
     return obj;
 }
 
-static struct bpf_object *open_bpf_object(const char *file, int ifindex) {
+static struct bpf_object *open_bpf_object(const char *file, int ifindex)
+{
     int err;
     struct bpf_object *obj;
     struct bpf_map *map;
@@ -143,14 +147,16 @@ static struct bpf_object *open_bpf_object(const char *file, int ifindex) {
         return NULL;
     }
 
-    bpf_object__for_each_program(prog, obj) {
+    bpf_object__for_each_program(prog, obj)
+    {
         bpf_program__set_type(prog, BPF_PROG_TYPE_XDP);
         bpf_program__set_ifindex(prog, ifindex);
         if (!first_prog)
             first_prog = prog;
     }
 
-    bpf_object__for_each_map(map, obj) {
+    bpf_object__for_each_map(map, obj)
+    {
         if (!bpf_map__is_offload_neutral(map))
             bpf_map__set_ifindex(map, ifindex);
     }
@@ -163,7 +169,8 @@ static struct bpf_object *open_bpf_object(const char *file, int ifindex) {
     return obj;
 }
 
-static int reuse_maps(struct bpf_object *obj, const char *path) {
+static int reuse_maps(struct bpf_object *obj, const char *path)
+{
     struct bpf_map *map;
 
     if (!obj)
@@ -172,7 +179,8 @@ static int reuse_maps(struct bpf_object *obj, const char *path) {
     if (!path)
         return -EINVAL;
 
-    bpf_object__for_each_map(map, obj) {
+    bpf_object__for_each_map(map, obj)
+    {
         int len, err;
         int pinned_map_fd;
         char buf[PATH_MAX];
@@ -198,7 +206,8 @@ static int reuse_maps(struct bpf_object *obj, const char *path) {
 
 struct bpf_object *load_bpf_object_file_reuse_maps(const char *file,
                                                    int ifindex,
-                                                   const char *pin_dir) {
+                                                   const char *pin_dir)
+{
     int err;
     struct bpf_object *obj;
 
@@ -223,7 +232,8 @@ struct bpf_object *load_bpf_object_file_reuse_maps(const char *file,
     return obj;
 }
 
-struct bpf_object *load_bpf_and_xdp_attach(struct config *cfg) {
+struct bpf_object *load_bpf_and_xdp_attach(struct config *cfg)
+{
     struct bpf_program *bpf_prog;
     struct bpf_object *bpf_obj;
     int offload_ifindex = 0;
@@ -293,14 +303,16 @@ static const char *xdp_action_names[XDP_ACTION_MAX] = {
     [XDP_REDIRECT] = "XDP_REDIRECT", [XDP_UNKNOWN] = "XDP_UNKNOWN",
 };
 
-const char *action2str(__u32 action) {
+const char *action2str(__u32 action)
+{
     if (action < XDP_ACTION_MAX)
         return xdp_action_names[action];
     return NULL;
 }
 
 int check_map_fd_info(const struct bpf_map_info *info,
-                      const struct bpf_map_info *exp) {
+                      const struct bpf_map_info *exp)
+{
     if (exp->key_size && exp->key_size != info->key_size) {
         EPRT("%s() Map key size(%d) mismatch expected size(%d)\n", __func__,
              info->key_size, exp->key_size);
@@ -326,7 +338,8 @@ int check_map_fd_info(const struct bpf_map_info *info,
 }
 
 int _open_bpf_map_file(const char *pin_dir, const char *mapname,
-                       struct bpf_map_info *info, bool silent) {
+                       struct bpf_map_info *info, bool silent)
+{
     char filename[PATH_MAX];
     int err, len, fd;
     __u32 info_len = sizeof(*info);
@@ -358,11 +371,13 @@ int _open_bpf_map_file(const char *pin_dir, const char *mapname,
 }
 
 int open_bpf_map_file(const char *pin_dir, const char *mapname,
-                      struct bpf_map_info *info) {
+                      struct bpf_map_info *info)
+{
     return _open_bpf_map_file(pin_dir, mapname, info, false);
 }
 
 int silent_open_bpf_map_file(const char *pin_dir, const char *mapname,
-                             struct bpf_map_info *info) {
+                             struct bpf_map_info *info)
+{
     return _open_bpf_map_file(pin_dir, mapname, info, true);
 }

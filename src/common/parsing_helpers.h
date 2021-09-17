@@ -21,14 +21,21 @@
 #ifndef __PARSING_HELPERS_H
 #define __PARSING_HELPERS_H
 
+/* Changing the following line to #define instead of #undef compiles
+ * fine on Ubuntu 20.04 systems, but not on Fedora 34.  The code that
+ * #define enables is not used, so #ifdef it out for now. */
+#undef ENABLE_ICMP_PARSING_FUNCTIONS
+
 #include <stddef.h>
 #include <linux/if_ether.h>
 #include <linux/if_packet.h>
 #include <linux/if_vlan.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
+#ifdef ENABLE_ICMP_PARSING_FUNCTIONS
 #include <linux/icmp.h>
 #include <linux/icmpv6.h>
+#endif // ENABLE_ICMP_PARSING_FUNCTIONS
 #include <linux/udp.h>
 #include <linux/tcp.h>
 
@@ -65,7 +72,8 @@ struct icmphdr_common {
 #define VLAN_MAX_DEPTH 4
 #endif
 
-static __always_inline int proto_is_vlan(__u16 h_proto) {
+static __always_inline int proto_is_vlan(__u16 h_proto)
+{
     return !!(h_proto == bpf_htons(ETH_P_8021Q) ||
               h_proto == bpf_htons(ETH_P_8021AD));
 }
@@ -76,7 +84,8 @@ static __always_inline int proto_is_vlan(__u16 h_proto) {
  * VLAN tagged packet.
  */
 static __always_inline int parse_ethhdr(struct hdr_cursor *nh, void *data_end,
-                                        struct ethhdr **ethhdr) {
+                                        struct ethhdr **ethhdr)
+{
     struct ethhdr *eth = nh->pos;
     int hdrsize = sizeof(*eth);
     struct vlan_hdr *vlh;
@@ -114,7 +123,8 @@ static __always_inline int parse_ethhdr(struct hdr_cursor *nh, void *data_end,
 }
 
 static __always_inline int parse_ip6hdr(struct hdr_cursor *nh, void *data_end,
-                                        struct ipv6hdr **ip6hdr) {
+                                        struct ipv6hdr **ip6hdr)
+{
     struct ipv6hdr *ip6h = nh->pos;
 
     /* Pointer-arithmetic bounds check; pointer +1 points to after end of
@@ -131,7 +141,8 @@ static __always_inline int parse_ip6hdr(struct hdr_cursor *nh, void *data_end,
 }
 
 static __always_inline int parse_iphdr(struct hdr_cursor *nh, void *data_end,
-                                       struct iphdr **iphdr) {
+                                       struct iphdr **iphdr)
+{
     struct iphdr *iph = nh->pos;
     int hdrsize;
 
@@ -150,8 +161,11 @@ static __always_inline int parse_iphdr(struct hdr_cursor *nh, void *data_end,
     return iph->protocol;
 }
 
+#ifdef ENABLE_ICMP_PARSING_FUNCTIONS
+
 static __always_inline int parse_icmp6hdr(struct hdr_cursor *nh, void *data_end,
-                                          struct icmp6hdr **icmp6hdr) {
+                                          struct icmp6hdr **icmp6hdr)
+{
     struct icmp6hdr *icmp6h = nh->pos;
 
     if (icmp6h + 1 > data_end)
@@ -164,7 +178,8 @@ static __always_inline int parse_icmp6hdr(struct hdr_cursor *nh, void *data_end,
 }
 
 static __always_inline int parse_icmphdr(struct hdr_cursor *nh, void *data_end,
-                                         struct icmphdr **icmphdr) {
+                                         struct icmphdr **icmphdr)
+{
     struct icmphdr *icmph = nh->pos;
 
     if (icmph + 1 > data_end)
@@ -176,9 +191,10 @@ static __always_inline int parse_icmphdr(struct hdr_cursor *nh, void *data_end,
     return icmph->type;
 }
 
-static __always_inline int
-parse_icmphdr_common(struct hdr_cursor *nh, void *data_end,
-                     struct icmphdr_common **icmphdr) {
+static __always_inline int parse_icmphdr_common(struct hdr_cursor *nh,
+                                                void *data_end,
+                                                struct icmphdr_common **icmphdr)
+{
     struct icmphdr_common *h = nh->pos;
 
     if (h + 1 > data_end)
@@ -190,11 +206,16 @@ parse_icmphdr_common(struct hdr_cursor *nh, void *data_end,
     return h->type;
 }
 
+#endif // ENABLE_ICMP_PARSING_FUNCTIONS
+
 /*
- * parse_tcphdr: parse the udp header and return the length of the udp payload
+ * parse_udphdr: parse the udp header and return the length of the UDP
+ * payload in bytes, not including the 8 bytes of the UDP header.
+ * Returns -1 if the UDP length was less than 8.
  */
 static __always_inline int parse_udphdr(struct hdr_cursor *nh, void *data_end,
-                                        struct udphdr **udphdr) {
+                                        struct udphdr **udphdr)
+{
     int len;
     struct udphdr *h = nh->pos;
 
@@ -213,9 +234,13 @@ static __always_inline int parse_udphdr(struct hdr_cursor *nh, void *data_end,
 
 /*
  * parse_tcphdr: parse and return the length of the tcp header
+ * (including any TCP options) in bytes.  Note that nh->pos is only
+ * updated to point just after the 20-byte fixed-length part of the
+ * TCP header, _not_ to just after the TCP options.
  */
 static __always_inline int parse_tcphdr(struct hdr_cursor *nh, void *data_end,
-                                        struct tcphdr **tcphdr) {
+                                        struct tcphdr **tcphdr)
+{
     int len;
     struct tcphdr *h = nh->pos;
 
@@ -231,22 +256,18 @@ static __always_inline int parse_tcphdr(struct hdr_cursor *nh, void *data_end,
 
     return len;
 }
+
 // Parse INT MD 0.5 headers
+
 static __always_inline int parse_int_md_hdr(
     struct hdr_cursor *nh, void *data_end, struct int_shim_hdr **intshimh,
     struct int_metadata_hdr **intmdh, struct int_metadata_entry **intmdsrc,
-    __u32 **seq_num, __u32 **extra_bytes) {
-    int len;
-
+    __u32 **seq_num, struct int_tail_hdr **tail_hdr)
+{
     // parse int_shim_hdr
     struct int_shim_hdr *tmp_intshimh = nh->pos;
     if (tmp_intshimh + 1 > data_end)
         return -1;
-
-    len = sizeof(struct int_shim_hdr);
-    if ((void *)tmp_intshimh + len > data_end)
-        return -1;
-
     nh->pos = tmp_intshimh + 1;
     *intshimh = tmp_intshimh;
 
@@ -254,11 +275,6 @@ static __always_inline int parse_int_md_hdr(
     struct int_metadata_hdr *tmp_intmdh = nh->pos;
     if (tmp_intmdh + 1 > data_end)
         return -1;
-
-    len = sizeof(struct int_metadata_hdr);
-    if ((void *)tmp_intmdh + len > data_end)
-        return -1;
-
     nh->pos = tmp_intmdh + 1;
     *intmdh = tmp_intmdh;
 
@@ -266,11 +282,6 @@ static __always_inline int parse_int_md_hdr(
     struct int_metadata_entry *tmp_intmdsrc = nh->pos;
     if (tmp_intmdsrc + 1 > data_end)
         return -1;
-
-    len = sizeof(struct int_metadata_entry);
-    if ((void *)tmp_intmdsrc + len > data_end)
-        return -1;
-
     nh->pos = tmp_intmdsrc + 1;
     *intmdsrc = tmp_intmdsrc;
 
@@ -278,44 +289,30 @@ static __always_inline int parse_int_md_hdr(
     __u32 *tmp_seqnum = nh->pos;
     if (tmp_seqnum + 1 > data_end)
         return -1;
-
-    len = sizeof(__u32);
-    if ((void *)tmp_seqnum + len > data_end)
-        return -1;
-
     nh->pos = tmp_seqnum + 1;
     *seq_num = tmp_seqnum;
 
-    // parse extra_bytes;
-    __u32 *tmp_extra_bytes = nh->pos;
-    if (tmp_extra_bytes + 1 > data_end)
+    // parse int_tail_hdr
+    struct int_tail_hdr *tmp_tail_hdr = nh->pos;
+    if (tmp_tail_hdr + 1 > data_end)
         return -1;
-
-    len = sizeof(__u32);
-    if ((void *)tmp_extra_bytes + len > data_end)
-        return -1;
-
-    nh->pos = tmp_extra_bytes + 1;
-    *extra_bytes = tmp_extra_bytes;
-
+    nh->pos = tmp_tail_hdr + 1;
+    *tail_hdr = tmp_tail_hdr;
     return 0;
 }
 
 // Parse INT MX 2.1 headers
-static __always_inline int parse_int_mx_hdr(
-    struct hdr_cursor *nh, void *data_end, struct int_mx_shim_hdr **intshimh,
-    struct int_mx_md_hdr **intmdh, struct int_mx_ds_src_md **intdsmdh) {
-    int len;
+static __always_inline int parse_int_mx_hdr(struct hdr_cursor *nh,
+                                            void *data_end,
+                                            struct int_mx_shim_hdr **intshimh,
+                                            struct int_mx_md_hdr **intmdh,
+                                            struct int_mx_ds_src_md **intdsmdh)
+{
 
     // parse int_mx_shim_hdr
     struct int_mx_shim_hdr *tmp_intshimh = nh->pos;
     if (tmp_intshimh + 1 > data_end)
         return -1;
-
-    len = sizeof(struct int_mx_shim_hdr);
-    if ((void *)tmp_intshimh + len > data_end)
-        return -1;
-
     nh->pos = tmp_intshimh + 1;
     *intshimh = tmp_intshimh;
 
@@ -323,11 +320,6 @@ static __always_inline int parse_int_mx_hdr(
     struct int_mx_md_hdr *tmp_intmdh = nh->pos;
     if (tmp_intmdh + 1 > data_end)
         return -1;
-
-    len = sizeof(struct int_mx_md_hdr);
-    if ((void *)tmp_intmdh + len > data_end)
-        return -1;
-
     nh->pos = tmp_intmdh + 1;
     *intmdh = tmp_intmdh;
 
@@ -335,11 +327,6 @@ static __always_inline int parse_int_mx_hdr(
     struct int_mx_ds_src_md *tmp_intdsmdh = nh->pos;
     if (tmp_intdsmdh + 1 > data_end)
         return -1;
-
-    len = sizeof(struct int_mx_ds_src_md);
-    if ((void *)tmp_intdsmdh + len > data_end)
-        return -1;
-
     nh->pos = tmp_intdsmdh + 1;
     *intdsmdh = tmp_intdsmdh;
 

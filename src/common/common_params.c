@@ -13,13 +13,15 @@
 #include <linux/if_link.h> /* XDP_FLAGS_* depend on kernel-headers installed */
 #include <linux/if_xdp.h>
 
+#include "intbpf.h"
 #include "common_params.h"
 
 int verbose = 1;
 
 #define BUFSIZE 54 // 80-26=54
 
-void _print_options(const struct option_wrapper *long_options, bool required) {
+void _print_options(const struct option_wrapper *long_options, bool required)
+{
     int i, pos, len;
     char buf[BUFSIZE];
 
@@ -54,7 +56,8 @@ void _print_options(const struct option_wrapper *long_options, bool required) {
 }
 
 void usage(const char *prog_name, const char *doc,
-           const struct option_wrapper *long_options, bool full) {
+           const struct option_wrapper *long_options, bool full)
+{
     printf("Usage: %s [options]\n", prog_name);
 
     if (!full) {
@@ -72,7 +75,8 @@ void usage(const char *prog_name, const char *doc,
 }
 
 int option_wrappers_to_options(const struct option_wrapper *wrapper,
-                               struct option **options) {
+                               struct option **options)
+{
     int i, num;
     struct option *new_options;
     for (i = 0; wrapper[i].option.name != 0; i++) {
@@ -90,7 +94,8 @@ int option_wrappers_to_options(const struct option_wrapper *wrapper,
     return 0;
 }
 
-void copy_trimmed_string(char *dst, char *src, size_t dst_len) {
+void copy_trimmed_string(char *dst, char *src, size_t dst_len)
+{
     // trim leading spaces
     while (isspace(*src))
         src++;
@@ -108,21 +113,25 @@ void copy_trimmed_string(char *dst, char *src, size_t dst_len) {
     dst[copy_len] = 0;
 }
 
-int get_int(char *str) {
+int get_int(char *str)
+{
     if (strlen(str) > 2 && str[0] == '0' && (str[1] == 'x' || str[1] == 'X')) {
         return (int)strtol(str, NULL, 16);
     } else {
         return atoi(str);
     }
 }
-
 void parse_cmdline_args(int argc, char **argv,
                         const struct option_wrapper *options_wrapper,
-                        struct config *cfg, const char *doc) {
+                        struct config *cfg, const char *doc)
+{
+    __u64 lat_entry[LATENCYBUCKET_MAP_MAX_ENTRIES];
     struct option *long_options;
+    long long int tmp_latency;
     bool full_help = false;
     int longindex = 0;
     char *dest;
+    int i = 0;
     int opt;
 
     if (option_wrappers_to_options(options_wrapper, &long_options)) {
@@ -131,9 +140,9 @@ void parse_cmdline_args(int argc, char **argv,
     }
 
     /* Parse commands line args */
-    while ((opt = getopt_long(argc, argv,
-                              "hd:r:ASNFUMQ:czpqf:n:v:m:t:l:s:i:C:P:o:b:T:",
-                              long_options, &longindex)) != -1) {
+    while ((opt = getopt_long(
+                argc, argv, "hd:r:ASNFUMVQ:czpqf:n:v:m:t:l:s:i:C:P:o:b:T:B:E:D",
+                long_options, &longindex)) != -1) {
         switch (opt) {
         case 'd':
             if (strlen(optarg) >= IF_NAMESIZE) {
@@ -260,12 +269,78 @@ void parse_cmdline_args(int argc, char **argv,
             dest = (char *)&cfg->bind_addr;
             copy_trimmed_string(dest, optarg, sizeof(cfg->bind_addr));
             break;
+        case 'B':
+            i = 0;
+            char *tmp;
+
+            while (i < LATENCYBUCKET_MAP_MAX_ENTRIES && *optarg) {
+                tmp_latency = strtoll(optarg, &tmp, 10);
+                if (optarg == tmp) {
+                    fprintf(stderr,
+                            "Error: All latency values must be"
+                            "integers. Found the following non-integer "
+                            "string instead: %s\n",
+                            optarg);
+                    goto error;
+                }
+                optarg = tmp;
+                if (tmp_latency <= 0) {
+                    fprintf(stderr,
+                            "Error: All latency values must be positive"
+                            "integers. Found illegal value %llu\n",
+                            tmp_latency);
+                    goto error;
+                }
+                lat_entry[i] = tmp_latency;
+                i++;
+                if (*optarg != ',')
+                    break;
+                optarg++;
+            }
+            cfg->num_latency_entries = i;
+
+            for (i = 0; i < (cfg->num_latency_entries - 1); i++) {
+                if (lat_entry[i] >= lat_entry[i + 1]) {
+                    fprintf(stderr,
+                            "Error: Latency values must be given in"
+                            "increasing order. Found smaller value %llu after"
+                            "%llu\n",
+                            lat_entry[i + 1], lat_entry[i]);
+                    goto error;
+                }
+            }
+
+            for (i = 0; i < cfg->num_latency_entries; i++) {
+                cfg->latency_entries.entries[i] = lat_entry[i];
+            }
+
+            if (cfg->num_latency_entries < LATENCYBUCKET_MAP_MAX_ENTRIES) {
+                cfg->latency_entries.entries[cfg->num_latency_entries] =
+                    U64_MAX_VALUE;
+            }
+            break;
         case 'T':
             if (strcasecmp(optarg, "SINK") == 0) {
                 cfg->prog_type = PT_SINK;
             } else if (strcasecmp(optarg, "SOURCE") == 0) {
                 cfg->prog_type = PT_SOURCE;
             }
+            break;
+        case 'V':
+            printf("Version: %s\n", VERSION);
+            exit(EXIT_OK);
+        case 'E':
+            if (strcmp(optarg, "int_05_over_tcp_udp") == 0) {
+                cfg->encap_type = ENCAP_INT_05_OVER_TCP_UDP;
+            } else if (strcmp(optarg, "int_05_extension_udp") == 0) {
+                cfg->encap_type = ENCAP_INT_05_EXTENSION_UDP;
+            } else {
+                fprintf(stderr, "Error: Invalid encap type.\n");
+                goto error;
+            }
+            break;
+        case 'D':
+            cfg->drop_packet = true;
             break;
         case 'h':
             full_help = true;

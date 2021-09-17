@@ -27,6 +27,7 @@ function usage() {
   1>&2 echo ""
   1>&2 echo "Other options:"
   1>&2 echo " -h, --help                 Show help"
+  1>&2 echo " -V, --Version              Print version number"
   1>&2 echo " -q, --quiet                Quiet mode (no output)"
   1>&2 echo " -n, --node-id              Node ID"
   1>&2 echo " -v, --dscp-val             DSCP Value"
@@ -52,8 +53,8 @@ function verb_msg() {
 }
 
 function parse_options() {
-  opts=$(getopt -o d:hqT:n:v:m:t:l:U \
-                -l dev,help,quiet,prog-type:,node-id:,dscp-val:,dscp-mask:,idle-flow-timeout-ms:,pkg-loss-timeout-ms:,unload,filename:,filter-filename: \
+  opts=$(getopt -o d:hVqT:n:v:m:t:l:U \
+                -l dev,help,Version,quiet,prog-type:,node-id:,dscp-val:,dscp-mask:,idle-flow-timeout-ms:,pkg-loss-timeout-ms:,unload,filename:,filter-filename: \
                 -n "$BASENAME" -- "$@")
   if [ $? != 0 ]; then
     1>&2 echo "Terminating..."
@@ -70,6 +71,9 @@ function parse_options() {
         shift 2;;
       -h | --help)
         usage
+        exit 0;;
+      -V | --Version)
+        hostintcfg -V
         exit 0;;
       -q | --quiet)
         opt_quiet=1

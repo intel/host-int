@@ -33,11 +33,12 @@
 //#include "intmx_headers.h"
 #include "uutils.h"
 
-static int report_seq_num = 1;
+static int global_report_seq_num = 1;
 static pthread_mutex_t seq_num_lock;
 
 static int done;
-static void sig_handler(int signo) {
+static void sig_handler(int signo)
+{
     DPRT("Caught signal. Stop program...\n");
     done = 1;
 }
@@ -61,6 +62,8 @@ static const char *__doc__ =
 static const struct option_wrapper long_options[] = {
     {{"help", no_argument, NULL, 'h'}, "Show help", false},
 
+    {{"Version", no_argument, NULL, 'V'}, "Print version number", false},
+
     {{"dev", required_argument, NULL, 'd'},
      "Operate on device <ifname>",
      "<ifname>",
@@ -80,12 +83,23 @@ static const struct option_wrapper long_options[] = {
     {{"pkg-loss-timeout-ms", required_argument, NULL, 'l'},
      "Package loss timeout (ms)"},
 
+    {{"latency-bucket", required_argument, NULL, 'B'},
+     "Latency bucket entry (ms)"},
+
     {{"collector-server", required_argument, NULL, 'C'},
      "Collector server name. Default is an empty string that indicates do not "
      "report data to a collector."},
 
     {{"collector-port", required_argument, NULL, 'P'},
      "Collector port number."},
+
+    {{"encap", required_argument, NULL, 'E'},
+     "Encap type can be 'int_05_over_tcp_udp' or 'int_05_extension_udp'."},
+
+    {{"drop-packet", no_argument, NULL, 'D'},
+     "When this option is present, all packets with INT headers received by "
+     "the UDP-encapsulation EBPF sink program will be dropped, and not sent "
+     "onwards to the Linux kernel."},
 
     {{"report-output", required_argument, NULL, 'o'},
      "Report output file. An empty string indicates do not report data to a "
@@ -100,14 +114,26 @@ static const struct option_wrapper long_options[] = {
 
     {{0, 0, NULL, 0}, NULL, false}};
 
-void cleanup() {
+void cleanup()
+{
     DPRT("CLEANUP\n");
     if (report_file) {
         fclose(report_file);
     }
 }
 
-uint64_t get_time_offset() {
+int get_next_report_seq_num(void)
+{
+    int ret;
+    pthread_mutex_lock(&seq_num_lock);
+    ret = global_report_seq_num;
+    global_report_seq_num += 1;
+    pthread_mutex_unlock(&seq_num_lock);
+    return ret;
+}
+
+uint64_t get_time_offset()
+{
     int i, ret1, ret2;
     struct timespec ts1, ts2;
     uint64_t ts1_ns, ts2_ns, delta, min_delta = 0;
@@ -134,9 +160,11 @@ uint64_t get_time_offset() {
     return min_delta;
 }
 
-int update_time_offset_map(int map_fd, uint64_t time_offset, char *map_name) {
+int update_time_offset_map(int map_fd, uint64_t time_offset, char *map_name)
+{
     __u16 time_offset_key = CONFIG_MAP_KEY_TIME_OFFSET;
-    int ret = bpf_map_update_elem(map_fd, &time_offset_key, &time_offset, BPF_ANY);
+    int ret =
+        bpf_map_update_elem(map_fd, &time_offset_key, &time_offset, BPF_ANY);
     if (ret < 0) {
         EPRT("Failed to update time offset (%lu) in %s err code: "
              "%i\n",
@@ -147,7 +175,8 @@ int update_time_offset_map(int map_fd, uint64_t time_offset, char *map_name) {
     return 0;
 }
 
-void update_time_offset(size_t timer_id, void *params) {
+void update_time_offset(size_t timer_id, void *params)
+{
     uint64_t new_offset = get_time_offset();
     if (!new_offset) {
         return;
@@ -187,16 +216,20 @@ void update_time_offset(size_t timer_id, void *params) {
     }
 }
 
-static int print_bpf_output(void *data, int size) {
+static int process_ebpf_perf_event_from_sink(void *data, int size)
+{
     struct {
         struct packet_metadata meta;
         __u8 pkt_data[SAMPLE_SIZE];
     } __packed *e = data;
     struct timespec ts;
+    struct flow_key key;
     int err;
+    int report_seq_num;
 
-    if (e->meta.s_meta.cookie != 0xdead) {
-        EPRT("BUG cookie %x sized %d\n", e->meta.s_meta.cookie, size);
+    if (e->meta.s_meta.cookie != PACKET_METADATA_COOKIE) {
+        EPRT("BUG expected cookie %x but found %x sized %d\n",
+             PACKET_METADATA_COOKIE, e->meta.s_meta.cookie, size);
         return LIBBPF_PERF_EVENT_ERROR;
     }
 
@@ -221,13 +254,26 @@ static int print_bpf_output(void *data, int size) {
      * send in this version of the code. */
     int ipv4_offset_in_pkt_data = sizeof(struct ethhdr);
     struct iphdr *iph = (struct iphdr *)&(e->pkt_data[ipv4_offset_in_pkt_data]);
+
     __u8 ip_protocol = iph->protocol;
     __u32 saddr = iph->saddr;
+    key.saddr = iph->saddr;
+    key.daddr = iph->daddr;
+    key.proto = iph->protocol;
+    /* TODO: Another place to change if we ever need to support IPv4
+     * options. */
+    int off = ipv4_offset_in_pkt_data + sizeof(struct iphdr);
 
     if (ip_protocol == IPPROTO_UDP) {
         l4_hdr_size = sizeof(struct udphdr);
+        struct udphdr *udph = (struct udphdr *)&(e->pkt_data[off]);
+        key.sport = udph->source;
+        key.dport = udph->dest;
     } else if (ip_protocol == IPPROTO_TCP) {
         l4_hdr_size = sizeof(struct tcphdr);
+        struct tcphdr *tcph = (struct tcphdr *)&(e->pkt_data[off]);
+        key.sport = tcph->source;
+        key.dport = tcph->dest;
     } else {
         return LIBBPF_PERF_EVENT_ERROR;
     }
@@ -244,6 +290,7 @@ static int print_bpf_output(void *data, int size) {
      * to the end of the INT header defined by 'struct
      * int_metadata_hdr'. */
     int int_rpt_body_part1_offset = ipv4_offset_in_pkt_data;
+
     __u32 int_rpt_body_part1_len =
         (sizeof(struct iphdr) + l4_hdr_size + sizeof(struct int_shim_hdr) +
          sizeof(struct int_metadata_hdr));
@@ -275,6 +322,7 @@ static int print_bpf_output(void *data, int size) {
            int_rpt_body_part3_len);
     offset += int_rpt_body_part3_len;
 
+    report_seq_num = get_next_report_seq_num();
     if (collector_port > 0) {
         // send the whole packet (excluding eth header) to the buffer
         err = send_latency_report(collector_name, 0, collector_port, pkt_len,
@@ -290,7 +338,7 @@ static int print_bpf_output(void *data, int size) {
                              (struct int_metadata_entry *)&(
                                  e->pkt_data[int_rpt_body_part3_offset]),
                              (struct int_metadata_entry *)&intmdsink,
-                             report_seq_num, &ts);
+                             report_seq_num, &ts, &key);
     }
 
     if (sender_collector_port > 0) {
@@ -302,9 +350,175 @@ static int print_bpf_output(void *data, int size) {
         }
     }
 
-    pthread_mutex_lock(&seq_num_lock);
-    report_seq_num += 1;
-    pthread_mutex_unlock(&seq_num_lock);
+#ifdef EXTRA_DEBUG
+    int i;
+    printf("pkt len: %-5d bytes. hdr: ", pkt_len);
+    for (i = 0; i < pkt_len; i++)
+        printf("%02x ", buffer[i]);
+    printf("\n");
+#endif
+    return LIBBPF_PERF_EVENT_CONT;
+}
+
+static int process_ebpf_perf_event_from_sink_without_encap(void *data, int size)
+{
+    struct {
+        struct packet_metadata meta;
+        __u8 pkt_data[SAMPLE_SIZE];
+    } __packed *e = data;
+    struct timespec ts;
+    struct flow_key key;
+    int err;
+    int report_seq_num;
+
+    if (e->meta.s_meta.cookie != PACKET_METADATA_COOKIE) {
+        EPRT("BUG expected cookie %x but found %x sized %d\n",
+             PACKET_METADATA_COOKIE, e->meta.s_meta.cookie, size);
+        return LIBBPF_PERF_EVENT_ERROR;
+    }
+
+    err = get_timestamp(&ts);
+    if (err < 0) {
+        EPRT("gettimeofday failed with code: %i\n", err);
+        return LIBBPF_PERF_EVENT_ERROR;
+    }
+
+    /* In order to simplify the sink EBPF program, it does not insert
+     * its metadata in the middle of the INT headers the way a normal
+     * INT device would do.  Instead it puts the data that it _should_
+     * insert into the middle of the INT header at the beginning of the
+     * packet it sends as a perf event, and expects the hostintd process
+     * to rearrange the data before sending an INT report. */
+    struct int_metadata_entry intmdsink = e->meta.intmdsink;
+    __u32 seq_num;
+    /* Note: This code assumes that the Ethernet protocol is IPv4.  That
+     * is the only kind of packet that sink EBPF program should ever
+     * send in this version of the code. */
+    int ipv4_offset_in_pkt_data = sizeof(struct ethhdr);
+    struct iphdr *iph = (struct iphdr *)&(e->pkt_data[ipv4_offset_in_pkt_data]);
+    __u32 saddr = iph->saddr;
+    key.saddr = iph->saddr;
+    key.daddr = iph->daddr;
+    /* TODO: Another place to change if we ever need to support IPv4
+     * options. */
+    int int_rpt_body_part1_offset = ipv4_offset_in_pkt_data;
+    __u32 int_rpt_body_part1_len = (sizeof(struct iphdr));
+
+    __u32 int_rpt_body_part2_len = 0;
+    int tail_offset = (ipv4_offset_in_pkt_data + sizeof(struct iphdr) +
+                       sizeof(struct udphdr) + sizeof(struct int_shim_hdr) +
+                       sizeof(struct int_metadata_hdr) + sizeof(seq_num) +
+                       sizeof(struct int_metadata_entry));
+
+    int int_rpt_body_part2_offset = (tail_offset + sizeof(struct int_tail_hdr));
+
+    struct int_tail_hdr *tail_hdr =
+        (struct int_tail_hdr *)&(e->pkt_data[tail_offset]);
+    if (tail_hdr->proto == IPPROTO_UDP) {
+        int_rpt_body_part2_len = sizeof(struct udphdr);
+        struct udphdr *udph =
+            (struct udphdr *)&(e->pkt_data[int_rpt_body_part2_offset]);
+        key.sport = udph->source;
+        key.dport = udph->dest;
+    } else if (tail_hdr->proto == IPPROTO_TCP) {
+        int_rpt_body_part2_len = sizeof(struct tcphdr);
+        struct tcphdr *tcph =
+            (struct tcphdr *)&(e->pkt_data[int_rpt_body_part2_offset]);
+        key.sport = tcph->source;
+        key.dport = tcph->dest;
+    } else {
+        EPRT("Not a supported protocol! (%i)\n", err);
+        return LIBBPF_PERF_EVENT_ERROR;
+    }
+
+    /* TODO: Verify that the INT length field is one of the expected
+     * values. */
+
+    /* int_rpt_body is the part of the INT report that comes after the
+     * header defined by 'struct int_report_hdr', containing some of the
+     * bytes from the packet sent here by the sink EBPF program. */
+
+    /* part1 begins just after the Ethernet header of the received
+     * packet, and continues up to the TCP/UDP header, and after that up
+     * to the end of the INT header defined by 'struct
+     * int_metadata_hdr'. */
+    int int_rpt_body_part3_offset =
+        (ipv4_offset_in_pkt_data + sizeof(struct iphdr) +
+         sizeof(struct udphdr));
+    __u32 int_rpt_body_part3_len =
+        (sizeof(struct int_shim_hdr) + sizeof(struct int_metadata_hdr));
+    /* Part 4 is the data in the format of 'struct int_metadata_entry'
+     * added by the sink EBPF program, which is right now in variable
+     * intmdsink, not in e->pkt_data */
+    __u32 int_rpt_body_part4_len = sizeof(struct int_metadata_entry);
+    int int_rpt_body_part5_offset =
+        (int_rpt_body_part3_offset + int_rpt_body_part3_len);
+    __u32 int_rpt_body_part5_len =
+        (sizeof(struct int_metadata_entry) + sizeof(seq_num));
+
+    /* Part 5 is the data in the format of 'struct int_metadata_entry'
+     * added by the source EBPF program, which is right now in
+     * e->pkt_data starting at the part3 offset calculated below. */
+
+    /* populate buffer */
+    __u32 pkt_len = (int_rpt_body_part1_len + int_rpt_body_part2_len +
+                     int_rpt_body_part3_len + int_rpt_body_part4_len +
+                     int_rpt_body_part5_len);
+    __u8 buffer[pkt_len];
+    __u32 offset = 0;
+    memcpy(&buffer[offset], &(e->pkt_data[int_rpt_body_part1_offset]),
+           int_rpt_body_part1_len);
+    struct iphdr *iph2 = (struct iphdr *)&buffer[offset];
+    iph2->protocol = tail_hdr->proto;
+    key.proto = iph2->protocol;
+
+    __u8 dscp_val = DEFAULT_INT_DSCP_VAL;
+    __u8 dscp_mask = DEFAULT_INT_DSCP_MASK;
+    iph2->tos = (iph2->tos & ~dscp_mask) | (dscp_val & dscp_mask);
+
+    offset += int_rpt_body_part1_len;
+
+    memcpy(&buffer[offset], &(e->pkt_data[int_rpt_body_part2_offset]),
+           int_rpt_body_part2_len);
+    offset += int_rpt_body_part2_len;
+
+    memcpy(&buffer[offset], &(e->pkt_data[int_rpt_body_part3_offset]),
+           int_rpt_body_part3_len);
+    offset += int_rpt_body_part3_len;
+
+    memcpy(&buffer[offset], &intmdsink, sizeof(struct int_metadata_entry));
+    offset += sizeof(struct int_metadata_entry);
+
+    memcpy(&buffer[offset], &(e->pkt_data[int_rpt_body_part5_offset]),
+           int_rpt_body_part5_len);
+    offset += int_rpt_body_part5_len;
+
+    report_seq_num = get_next_report_seq_num();
+    if (collector_port > 0) {
+        // send the whole packet (excluding eth header) to the buffer
+        err = send_latency_report(collector_name, 0, collector_port, pkt_len,
+                                  buffer, report_seq_num, &ts);
+        if (err) {
+            EPRT("Failed to send report! (%i)\n", err);
+            return LIBBPF_PERF_EVENT_ERROR;
+        }
+    }
+
+    if (report_file) {
+        print_latency_report(report_file,
+                             (struct int_metadata_entry *)&(
+                                 e->pkt_data[int_rpt_body_part5_offset]),
+                             (struct int_metadata_entry *)&intmdsink,
+                             report_seq_num, &ts, &key);
+    }
+    if (sender_collector_port > 0) {
+        err = send_latency_report(NULL, saddr, sender_collector_port, pkt_len,
+                                  buffer, report_seq_num, &ts);
+        if (err) {
+            EPRT("Failed to send back report to sender! (%i)\n", err);
+            return LIBBPF_PERF_EVENT_ERROR;
+        }
+    }
 
 #ifdef EXTRA_DEBUG
     int i;
@@ -313,18 +527,18 @@ static int print_bpf_output(void *data, int size) {
         printf("%02x ", buffer[i]);
     printf("\n");
 #endif
-    // pcap_dump((u_char *) pdumper, &h, e->pkt_data);
-    // pcap_pkts++;
     return LIBBPF_PERF_EVENT_CONT;
 }
 
 static int send_drop_summary_report(struct flow_key *key,
                                     struct sink_flow_stats_datarec *value,
-                                    struct timespec *ts) {
+                                    struct timespec *ts)
+{
 
     int err;
     __u16 len;
     __u8 buf[MAX_REPORT_PAYLOAD_LEN];
+    int report_seq_num;
 
     // create drop summary report data
     struct int_drop_summary_data reportd;
@@ -336,20 +550,23 @@ static int send_drop_summary_report(struct flow_key *key,
         (uint32_t)(value->gap_head_ts_ns / ((uint32_t)NANOSECS_PER_USEC *
                                             USECS_PER_MSEC * MSECS_PER_SEC)));
     reportd.flow_seq_num = htonl(value->gap_head_seq_num);
-    reportd.gap_count =
-        htonl(value->gap_tail_seq_num - value->gap_head_seq_num - 1 -
-              value->gap_pkt_count);
+    reportd.gap_count = htonl(value->gap_pkts_not_rcvd);
+    const unsigned int max_report_size =
+        (sizeof(struct int_drop_summary_data) + sizeof(struct iphdr) +
+         sizeof(struct tcphdr));
+    if (max_report_size > MAX_REPORT_PAYLOAD_LEN) {
+        EPRT("Report size (%u) exceeds the max payload len\n", max_report_size);
+        return -1;
+    }
     memcpy(buf, &reportd, sizeof(reportd));
     len = sizeof(reportd);
 
     // create IP header
-    struct iphdr iph = {
-        .ihl = 5,
-        .version = 4,
-        .protocol = key->proto,
-        .saddr = htonl(key->saddr),
-        .daddr = htonl(key->daddr),
-    };
+    struct iphdr iph = {.version = 4,
+                        .ihl = 5,
+                        .protocol = key->proto,
+                        .saddr = key->saddr,
+                        .daddr = key->daddr};
     memcpy(buf + len, &iph, sizeof(iph));
     len += sizeof(iph);
 
@@ -357,8 +574,8 @@ static int send_drop_summary_report(struct flow_key *key,
     // create L4 header
     if (key->proto == IPPROTO_UDP) { // UDP
         struct udphdr udph = {
-            .source = htons(key->sport),
-            .dest = htons(key->dport),
+            .source = key->sport,
+            .dest = key->dport,
             .len = htons(sizeof(udph)),
         };
         l4_hdr_size += sizeof(udph);
@@ -366,14 +583,15 @@ static int send_drop_summary_report(struct flow_key *key,
         len += sizeof(udph);
     } else if (key->proto == IPPROTO_TCP) { // TCP
         struct tcphdr tcph = {
-            .source = htons(key->sport),
-            .dest = htons(key->dport),
+            .source = key->sport,
+            .dest = key->dport,
         };
         l4_hdr_size += sizeof(tcph);
         memcpy(buf + len, &tcph, sizeof(tcph));
         len += sizeof(tcph);
     }
 
+    report_seq_num = get_next_report_seq_num();
     if (collector_port > 0) {
         err = send_drop_report(collector_name, 0, collector_port, len, buf,
                                report_seq_num, ts);
@@ -384,7 +602,7 @@ static int send_drop_summary_report(struct flow_key *key,
     }
 
     if (report_file) {
-        print_drop_report(report_file, &reportd, report_seq_num, ts);
+        print_drop_report(report_file, &reportd, report_seq_num, ts, key);
     }
 
     if (sender_collector_port > 0) {
@@ -395,14 +613,37 @@ static int send_drop_summary_report(struct flow_key *key,
             return -1;
         }
     }
-
-    pthread_mutex_lock(&seq_num_lock);
-    report_seq_num += 1;
-    pthread_mutex_unlock(&seq_num_lock);
     return 0;
 }
 
-void clear_source_idle_flows(size_t timer_id, void *params) {
+/* Note 3: wrap-around time of timestamps used
+ *
+ * The variable curr_ts_ns is an unsigned 64-bit integer that is the
+ * number of nanoseconds since the Unix epoch, 1970-Jan-01.
+ *
+ * That value will not wrap around until 2^64 nanoseconds later, which
+ * is:
+ *
+ * (2^64 nsec) / ((10^9 nsec/sec) * (3600 sec/hour) * (24 hours/day) *
+ *                (365.25 days/year))
+ * ~= 584.5 years
+ *
+ * which is some time during the year 2554 AD.  This software is
+ * assumed to be end of life or updated to handle the Y2554 problem
+ * before then.
+ *
+ * By contrast, 32-bit timestamps in units of nanoseconds wrap around every
+ *
+ * (2^32 nsec) / (10^9 nsec/sec)
+ * ~= 4.295 sec
+ *
+ * so all arithmetic on 32-bit timestamps should be done with unsigned
+ * arithmetic in C, which is defined to be modulo 2^32, and have
+ * predictable results (C does not define the results of overflow for
+ * signed arithmetic, only unsigned). */
+
+void clear_source_idle_flows(size_t timer_id, void *params)
+{
     uint64_t idle_flow_timeout_ns = sink_idle_flow_timeout_ns;
     // check map file
     if (source_flow_stats_map_fd < 0) {
@@ -443,7 +684,15 @@ void clear_source_idle_flows(size_t timer_id, void *params) {
         }
         DPRT("curr_ts_ns: %" PRIu64 ", val.ts_ns: %llu\n", curr_ts_ns,
              value.ts_ns);
-        if (curr_ts_ns - value.ts_ns > idle_flow_timeout_ns) {
+        /* It is possible that the source EBPF program has updated a
+         * map entry after this function began running.  If so,
+         * value.ts_ns can be greater than curr_ts_ns.  Do not perform
+         * the entry age calculation in that case, since it will wrap
+         * around, which for a type uint64_t it wraps around to a very
+         * large positive value. */
+        /* See Note 3*/
+        if ((curr_ts_ns > value.ts_ns) &&
+            ((curr_ts_ns - value.ts_ns) > idle_flow_timeout_ns)) {
             to_delete[to_delete_size++] = key;
             DPRT("Delete entry\n");
         }
@@ -464,7 +713,8 @@ void clear_source_idle_flows(size_t timer_id, void *params) {
     }
 }
 
-void pkt_drop_stats_collect(size_t timer_id, void *params) {
+void pkt_drop_stats_collect(size_t timer_id, void *params)
+{
     uint64_t idle_flow_timeout_ns = sink_idle_flow_timeout_ns;
     uint64_t pkt_loss_timeout_ns = sink_pkt_loss_timeout_ns;
     int flow_stats_map_fd = *((int *)params);
@@ -485,7 +735,6 @@ void pkt_drop_stats_collect(size_t timer_id, void *params) {
     uint64_t curr_ts_ns = ((uint64_t)curr_ts.tv_sec * NANOSECS_PER_USEC *
                            USECS_PER_MSEC * MSECS_PER_SEC) +
                           curr_ts.tv_nsec;
-    uint64_t delta_ns = 0;
 
     // while(bpf_map_get_next_key_and_delete(&flow_gap_map_fd, prev_key, &key,
     // &delete_previous) == 0) {
@@ -496,28 +745,49 @@ void pkt_drop_stats_collect(size_t timer_id, void *params) {
         }
         DPRT("curr_ts_ns: %" PRIu64
              ", val.gap_head_ts_ns: %llu, val.gap_head_seq_no: %u, "
-             "val.gap_tail_ts_ns: %llu, val.gap_tail_seq_no: %u, count: %u\n",
+             "val.gap_tail_ts_ns: %llu, val.gap_tail_seq_no: %u,"
+             " val.gap_pkts_not_rcvd: %u\n",
              curr_ts_ns, value.gap_head_ts_ns, value.gap_head_seq_num,
-             value.gap_tail_ts_ns, value.gap_tail_seq_num, value.gap_pkt_count);
-        delta_ns = curr_ts_ns - value.gap_head_ts_ns;
+             value.gap_tail_ts_ns, value.gap_tail_seq_num,
+             value.gap_pkts_not_rcvd);
+        /* The last time the entry was updated is the later of the
+         * gap_head and gap_tail times. */
+        uint64_t entry_ts_ns = value.gap_head_ts_ns;
+        if (value.gap_tail_ts_ns > entry_ts_ns) {
+            entry_ts_ns = value.gap_tail_ts_ns;
+        }
+        /* It is possible that the sink EBPF program has updated a map
+         * entry after this function began running.  If so,
+         * entry_ts_ns can be greater than curr_ts_ns.  Treat the
+         * entry age as 0 in this case, since doing the subtraction
+         * will wrap around, which for a type uint64_t it wraps around
+         * to a very large positive value. */
+        uint64_t entry_age_ns = 0;
+        if (curr_ts_ns > entry_ts_ns) {
+            entry_age_ns = curr_ts_ns - entry_ts_ns;
+        }
+        int delete_entry = 0;
+        if (entry_age_ns > idle_flow_timeout_ns) {
+            // Remove the gap entry from the map
+            to_delete[to_delete_size++] = key;
+            DPRT("Delete entry\n");
+            delete_entry = 1;
+        }
+        uint64_t delta_ns = 0;
+        if (curr_ts_ns > value.gap_head_ts_ns) {
+            delta_ns = curr_ts_ns - value.gap_head_ts_ns;
+        }
         if (delta_ns > pkt_loss_timeout_ns) {
-            if (value.gap_tail_seq_num != 0 &&
-                value.gap_tail_seq_num - value.gap_head_seq_num - 1 >
-                    value.gap_pkt_count) {
+            if (value.gap_pkts_not_rcvd != 0) {
                 DPRT("Send drop summary report\n");
                 send_drop_summary_report(&key, &value, &curr_ts);
             }
-
-            if (delta_ns > idle_flow_timeout_ns) {
-                // Remove the gap entry from the map
-                to_delete[to_delete_size++] = key;
-                DPRT("Delete entry\n");
-            } else if (value.gap_tail_seq_num != 0) {
+            if ((delete_entry == 0) && (value.gap_tail_seq_num != 0)) {
                 value.gap_head_ts_ns = value.gap_tail_ts_ns;
                 value.gap_tail_ts_ns = 0;
                 value.gap_head_seq_num = value.gap_tail_seq_num;
                 value.gap_tail_seq_num = 0;
-                value.gap_pkt_count = 0;
+                value.gap_pkts_not_rcvd = 0;
                 int res = bpf_map_update_elem(flow_stats_map_fd, &key, &value,
                                               BPF_EXIST);
                 if (res < 0) {
@@ -540,7 +810,8 @@ void pkt_drop_stats_collect(size_t timer_id, void *params) {
     }
 }
 
-int deploy_ebpf(struct config *cfg) {
+int deploy_ebpf(struct config *cfg)
+{
     int ret;
     char pin_filename[PATH_MAX];
 
@@ -578,7 +849,8 @@ int deploy_ebpf(struct config *cfg) {
     return EXIT_OK;
 }
 
-static void reload_handler() {
+static void reload_handler()
+{
     VPRT("Reloading configurations\n");
     __u16 key = CONFIG_MAP_KEY_IDLE_TO;
     __u32 val;
@@ -603,14 +875,15 @@ static void reload_handler() {
     }
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv)
+{
     setvbuf(stdout, NULL, _IOLBF, 0);
     struct rlimit r = {RLIM_INFINITY, RLIM_INFINITY};
 
     int perf_map_fd;
     int flow_stats_map_fd;
+    int latency_bucket_map_fd;
     struct bpf_map_info info = {0};
-    // struct bpf_map *map;
 
     int ret, i, len;
     int numcpus = libbpf_num_possible_cpus();
@@ -635,11 +908,15 @@ int main(int argc, char **argv) {
         .pkt_loss_timeout_ms = PKT_LOSS_TIMEOUT_MS,
         .server_hostname = "",
         .server_port = -1,
+        .drop_packet = false,
         .sender_collector_port = -1,
+        .num_latency_entries = 0,
+        .encap_type = -1,
     };
-    strncpy(cfg.report_file, DEFAULT_HOSTINTD_REPORT_FILE,
-            sizeof(cfg.report_file));
-    strncpy(cfg.filename, DEFAULT_KSINK_FILE, sizeof(cfg.filename));
+
+    snprintf(cfg.report_file, sizeof(cfg.report_file), "%s",
+             DEFAULT_HOSTINTD_REPORT_FILE);
+    snprintf(cfg.filename, sizeof(cfg.filename), "%s", DEFAULT_KSINK_FILE);
 
     if (pthread_mutex_init(&seq_num_lock, NULL) != 0) {
         EPRT("Mutex init failed.\n");
@@ -664,6 +941,18 @@ int main(int argc, char **argv) {
 
     if (cfg.dscp_val != -1 && cfg.dscp_mask == -1) {
         EPRT("dscp mask is not specified\n");
+        usage(argv[0], __doc__, long_options, (argc == 1));
+        return EXIT_FAIL_OPTION;
+    }
+
+    if (cfg.encap_type == -1) {
+        EPRT("Encap type is not specified\n");
+        usage(argv[0], __doc__, long_options, (argc == 1));
+        return EXIT_FAIL_OPTION;
+    }
+
+    if (cfg.num_latency_entries == 0) {
+        EPRT("Required option --latency-bucket missing\n");
         usage(argv[0], __doc__, long_options, (argc == 1));
         return EXIT_FAIL_OPTION;
     }
@@ -741,6 +1030,24 @@ int main(int argc, char **argv) {
     }
     VPRT("Opened %s with id=%i\n", SINK_MAP_FLOW_STATS, info.id);
 
+    latency_bucket_map_fd =
+        open_bpf_map_file(cfg.pin_dir, SINK_MAP_LATENCY, &info);
+    if (latency_bucket_map_fd < 0) {
+        EPRT("Failed to open %s from %s\n", SINK_MAP_LATENCY, cfg.pin_dir);
+        return EXIT_FAIL_BPF;
+    }
+    VPRT("Opened %s with id=%i\n", SINK_MAP_LATENCY, info.id);
+
+    __u16 latency_bucket_key = LATENCY_MAP_KEY_LATENCY_BUCKET;
+
+    ret = bpf_map_update_elem(latency_bucket_map_fd, &latency_bucket_key,
+                              &cfg.latency_entries, BPF_ANY);
+    if (ret < 0) {
+        EPRT("Failed to insert entry in latency bucket map. err code: %i\n",
+             ret);
+        return EXIT_FAIL_BPF;
+    }
+
     sink_config_map_fd = open_bpf_map_file(cfg.pin_dir, SINK_MAP_CONFIG, &info);
     if (sink_config_map_fd < 0) {
         EPRT("Failed to open %s from %s\n", SINK_MAP_CONFIG, cfg.pin_dir);
@@ -810,6 +1117,20 @@ int main(int argc, char **argv) {
     VPRT("Set packet loss timeout to %i ms in sink config map\n",
          cfg.pkt_loss_timeout_ms);
 
+    __u16 drop_packet_key = CONFIG_MAP_KEY_DROP_PACKET;
+    if (cfg.drop_packet == 1) {
+        ret = bpf_map_update_elem(sink_config_map_fd, &drop_packet_key,
+                                  &cfg.drop_packet, BPF_ANY);
+        if (ret < 0) {
+            EPRT("Failed to insert drop packet (%i) in sink config map. err "
+                 "code: "
+                 "%i\n",
+                 cfg.drop_packet, ret);
+            return EXIT_FAIL_BPF;
+        }
+        VPRT("Set drop packet to (%i) in sink config map\n", cfg.drop_packet);
+    }
+
     test_bpf_perf_event(perf_map_fd, numcpus);
 
     for (i = 0; i < numcpus; i++) {
@@ -826,9 +1147,17 @@ int main(int argc, char **argv) {
     time_offset_update_timer =
         start_timer(TU_INTERVAL_SEC * MSECS_PER_SEC, update_time_offset, NULL);
 
-    ret = perf_event_poller_multi(pmu_fds, headers, numcpus, print_bpf_output,
-                                  &done);
-
+    if (cfg.encap_type == ENCAP_INT_05_OVER_TCP_UDP) {
+        ret = perf_event_poller_multi(pmu_fds, headers, numcpus,
+                                      process_ebpf_perf_event_from_sink, &done);
+    } else if (cfg.encap_type == ENCAP_INT_05_EXTENSION_UDP) {
+        ret = perf_event_poller_multi(
+            pmu_fds, headers, numcpus,
+            process_ebpf_perf_event_from_sink_without_encap, &done);
+    } else {
+        EPRT("Invalid encap type: %d\n", cfg.encap_type);
+        return EXIT_FAIL_BPF;
+    }
     stop_timer(drop_detection_timer);
     stop_timer(source_clean_timer);
     stop_timer(time_offset_update_timer);

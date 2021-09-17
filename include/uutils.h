@@ -22,13 +22,15 @@ static int pmu_fds[MAX_CPUS];
 static struct perf_event_mmap_page *headers[MAX_CPUS];
 
 static inline int perf_event_open(struct perf_event_attr *event, pid_t pid,
-                                  int cpu, int group_fd, unsigned long flags) {
+                                  int cpu, int group_fd, unsigned long flags)
+{
     int res = syscall(__NR_perf_event_open, event, pid, cpu, group_fd, flags);
 
     return res;
 }
 
-static void test_bpf_perf_event(int map_fd, int num) {
+static void test_bpf_perf_event(int map_fd, int num)
+{
     struct perf_event_attr attr = {
         .sample_type = PERF_SAMPLE_RAW,
         .type = PERF_TYPE_SOFTWARE,
@@ -64,7 +66,8 @@ struct perf_record_lost {
 typedef enum bpf_perf_event_ret (*perf_event_print_fn)(void *data, int size);
 
 static enum bpf_perf_event_ret
-bpf_perf_event_print(struct perf_event_header *header, void *private_data) {
+bpf_perf_event_print(struct perf_event_header *header, void *private_data)
+{
     perf_event_print_fn fn = private_data;
 
     if (header->type == PERF_RECORD_SAMPLE) {
@@ -84,7 +87,8 @@ bpf_perf_event_print(struct perf_event_header *header, void *private_data) {
 static int page_size;
 static int page_cnt = 8;
 
-int perf_event_mmap_header(int fd, struct perf_event_mmap_page **header) {
+int perf_event_mmap_header(int fd, struct perf_event_mmap_page **header)
+{
     void *base;
     int mmap_size;
 
@@ -103,7 +107,8 @@ int perf_event_mmap_header(int fd, struct perf_event_mmap_page **header) {
 
 int perf_event_poller_multi(int *fds, struct perf_event_mmap_page **headers,
                             int num_fds, perf_event_print_fn output_fn,
-                            int *done) {
+                            int *done)
+{
     enum bpf_perf_event_ret ret = 0;
     struct pollfd *pfds;
     void *buf = NULL;

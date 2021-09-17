@@ -3,6 +3,8 @@
 
 XDP_TARGETS += intmd_xdp_ksource
 XDP_TARGETS += intmd_xdp_ksink
+XDP_TARGETS += intmd_xdp_uencap_ksink
+#XDP_TARGETS += intmd_xdp_ksink
 USER_TARGETS += xdp_loader
 USER_LIBS=-lpthread
 

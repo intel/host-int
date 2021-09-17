@@ -7,18 +7,17 @@ import socket
 import sys
 
 def usage():
-    print("usage: %s <server-address> <server-tcp-port> <data-size> <buffer-size>" % (sys.argv[0]))
+    print("usage: %s <server-address> <server-tcp-port> <data-size>" % (sys.argv[0]))
 
 def bytes_to_hex(b):
      return ''.join(['%02x' % (x) for x in b])
-if len(sys.argv) != 5:
+if len(sys.argv) != 4:
     usage()
     sys.exit(1)
 
 serverAddress = sys.argv[1]
 serverPort = int(sys.argv[2])
 dataSize = int(sys.argv[3])
-bufferSize = int(sys.argv[4])
 
 serverAddressPort   = (serverAddress, serverPort)
 MESSAGE = "X" * dataSize

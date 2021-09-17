@@ -70,7 +70,8 @@ static const struct option_wrapper long_options[] = {
 const char *pin_basedir = "/sys/fs/bpf";
 
 /* Pinning maps under /sys/fs/bpf in subdir */
-int pin_maps_in_bpf_object(struct bpf_object *bpf_obj, struct config *cfg) {
+int pin_maps_in_bpf_object(struct bpf_object *bpf_obj, struct config *cfg)
+{
     int err;
 
     /* Existing/previous XDP prog might not have cleaned up */
@@ -95,7 +96,8 @@ int pin_maps_in_bpf_object(struct bpf_object *bpf_obj, struct config *cfg) {
     return 0;
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv)
+{
     struct bpf_object *bpf_obj;
     int err, len;
 
@@ -105,7 +107,7 @@ int main(int argc, char **argv) {
         .do_unload = false,
     };
     /* Set default BPF-ELF object file and BPF program name */
-    strncpy(cfg.filename, default_filename, sizeof(cfg.filename));
+    snprintf(cfg.filename, sizeof(cfg.filename), "%s", default_filename);
     /* Cmdline options can change progsec */
     parse_cmdline_args(argc, argv, long_options, &cfg, __doc__);
 
@@ -122,7 +124,8 @@ int main(int argc, char **argv) {
         return xdp_link_detach(cfg.ifindex, cfg.xdp_flags, 0);
     }
 
-    len = snprintf(cfg.pin_dir, sizeof(cfg.pin_dir), "%s/%s", pin_basedir, cfg.ifname);
+    len = snprintf(cfg.pin_dir, sizeof(cfg.pin_dir), "%s/%s", pin_basedir,
+                   cfg.ifname);
     if (len < 0) {
         fprintf(stderr, "ERR: creating pin dirname\n");
         return EXIT_FAIL_OPTION;

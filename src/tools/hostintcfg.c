@@ -25,6 +25,8 @@ static const char *__doc__ =
 static const struct option_wrapper long_options[] = {
     {{"help", no_argument, NULL, 'h'}, "Show help", false},
 
+    {{"Version", no_argument, NULL, 'V'}, "Print version number", false},
+
     {{"dev", required_argument, NULL, 'd'},
      "Operate on device <ifname>",
      "<ifname>",
@@ -43,6 +45,8 @@ static const struct option_wrapper long_options[] = {
 
     {{"dscp-mask", required_argument, NULL, 'm'}, "DSCP Mask"},
 
+    {{"latency-bucket", required_argument, NULL, 'B'}, "Latency Bucket"},
+
     {{"filter-filename", required_argument, NULL, 4},
      "Traffic classification (allow list) <file>",
      "<file>"},
@@ -56,7 +60,8 @@ static const struct option_wrapper long_options[] = {
     {{0, 0, NULL, 0}, NULL, false}};
 
 int bpf_map_get_next_key_and_delete(int fd, const void *key, void *next_key,
-                                    bool del) {
+                                    bool del)
+{
     int ret = bpf_map_get_next_key(fd, key, next_key);
     if (del) {
         bpf_map_delete_elem(fd, key);
@@ -64,7 +69,8 @@ int bpf_map_get_next_key_and_delete(int fd, const void *key, void *next_key,
     return ret;
 }
 
-int load_filter(int filter_map_fd, FILE *fp) {
+int load_filter(int filter_map_fd, FILE *fp)
+{
     struct hostent *server;
     char buffer[MAX_NAME + 2]; // one for new line, one for null termination
     int count = 0, ret;
@@ -153,7 +159,8 @@ int load_filter(int filter_map_fd, FILE *fp) {
     return EXIT_OK;
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv)
+{
     int ret;
     struct config cfg = {
         .ifindex = -1,
@@ -163,6 +170,7 @@ int main(int argc, char **argv) {
         .dscp_mask = -1,
         .idle_flow_timeout_ms = -1,
         .pkt_loss_timeout_ms = -1,
+        .num_latency_entries = 0,
     };
 
     parse_cmdline_args(argc, argv, long_options, &cfg, __doc__);
@@ -195,6 +203,11 @@ int main(int argc, char **argv) {
         EPRT("dscp mask is not specified\n");
         usage(argv[0], __doc__, long_options, (argc == 1));
         return EXIT_FAIL_OPTION;
+    }
+
+    if (cfg.num_latency_entries > 0 && cfg.prog_type == PT_SOURCE) {
+        cfg.num_latency_entries = 0;
+        WPRT("Program type is SOURCE. Ignore latency bucket value.\n");
     }
 
     if (cfg.filter_filename[0] && cfg.prog_type == PT_SINK) {
@@ -331,6 +344,5 @@ int main(int argc, char **argv) {
         VPRT("Set packet loss timeout in %s to %i ms\n", map_name,
              cfg.pkt_loss_timeout_ms);
     }
-
     return EXIT_OK;
 }

@@ -34,7 +34,8 @@ static const int udp_int_meta_offset =
 static FILE *report_file;
 
 static int done;
-static void sig_handler(int signo) {
+static void sig_handler(int signo)
+{
     DPRT("Caught signal. Stop program...\n");
     done = 1;
 }
@@ -45,6 +46,8 @@ static const char *__doc__ =
 
 static const struct option_wrapper long_options[] = {
     {{"help", no_argument, NULL, 'h'}, "Show help", false},
+
+    {{"Version", no_argument, NULL, 'V'}, "Print version number", false},
 
     {{"quiet", no_argument, NULL, 'q'}, "Quiet mode (no output)"},
 
@@ -60,14 +63,16 @@ static const struct option_wrapper long_options[] = {
 
     {{0, 0, NULL, 0}, NULL, false}};
 
-void cleanup() {
+void cleanup()
+{
     DPRT("CLEANUP\n");
     if (report_file) {
         fclose(report_file);
     }
 }
 
-int launch_udp_receiver(char *ip_addr, int port) {
+int launch_udp_receiver(char *ip_addr, int port)
+{
     int sockfd;
     struct sockaddr_in server_addr = {0};
 
@@ -104,9 +109,33 @@ int launch_udp_receiver(char *ip_addr, int port) {
     return sockfd;
 }
 
-void process_legacy_report(__u8 *data, int len, __u32 seq_num, __u32 ts) {
-    __u8 ip_protocol =
-        data[sizeof(struct int_report_hdr) + offsetof(struct iphdr, protocol)];
+void get_flow_key(struct flow_key *out_key, __u8 *data, int len, int iph_offset)
+{
+    struct iphdr *iph = (struct iphdr *)&(data[iph_offset]);
+    /* TODO: Another place to change if we ever need to support IPv4
+     * options. */
+    int offset = iph_offset + sizeof(struct iphdr);
+    out_key->saddr = iph->saddr;
+    out_key->daddr = iph->daddr;
+    out_key->proto = iph->protocol;
+    if (iph->protocol == IPPROTO_UDP) {
+        struct udphdr *udph = (struct udphdr *)&(data[offset]);
+        out_key->sport = udph->source;
+        out_key->dport = udph->dest;
+    } else if (iph->protocol == IPPROTO_TCP) {
+        struct tcphdr *tcph = (struct tcphdr *)&(data[offset]);
+        out_key->sport = tcph->source;
+        out_key->dport = tcph->dest;
+    }
+}
+
+void process_legacy_report(__u8 *data, int len, __u32 seq_num, __u32 ts)
+{
+    struct flow_key key;
+    int offset = sizeof(struct int_report_hdr);
+    struct iphdr *iph = (struct iphdr *)&(data[offset]);
+    get_flow_key(&key, data, len, offset);
+    __u8 ip_protocol = iph->protocol;
     int int_meta_offset = 0;
     if (ip_protocol == IPPROTO_UDP) {
         int_meta_offset = udp_int_meta_offset;
@@ -125,33 +154,44 @@ void process_legacy_report(__u8 *data, int len, __u32 seq_num, __u32 ts) {
             (struct int_metadata_entry
                  *)&data[int_meta_offset + sizeof(struct int_metadata_entry)],
             (struct int_metadata_entry *)&data[int_meta_offset], seq_num,
-            &tmp_ts);
+            &tmp_ts, &key);
     }
 }
 
-void process_drop_report(__u8 *data, int len, __u32 seq_num, __u32 ts) {
+void process_drop_report(__u8 *data, int len, __u32 seq_num, __u32 ts)
+{
+    struct flow_key key;
     struct timespec tmp_ts = {0};
     tmp_ts.tv_sec = ts;
     if (report_file) {
         struct int_drop_summary_data reportd;
         memcpy(&reportd, data + sizeof(struct int_report_hdr), sizeof(reportd));
-        print_drop_report(report_file, &reportd, seq_num, &tmp_ts);
+        get_flow_key(&key, data, len,
+                     (sizeof(struct int_report_hdr) +
+                      sizeof(struct int_drop_summary_data)));
+        print_drop_report(report_file, &reportd, seq_num, &tmp_ts, &key);
     }
 }
 
-void listen_data(int sockfd) {
+void listen_data(int sockfd)
+{
     int pkt_len;
     socklen_t addr_len;
     struct sockaddr_in client_addr = {0};
     __u8 data[MAX_PKT_SIZE];
     struct int_report_hdr reporth;
-    int rhlen = sizeof(reporth);
 
     addr_len = sizeof(client_addr);
     while (!done) {
         pkt_len = recvfrom(sockfd, data, MAX_PKT_SIZE, MSG_DONTWAIT,
                            (struct sockaddr *)&client_addr, &addr_len);
-        if (pkt_len > rhlen) {
+        if (pkt_len < 0) {
+            /* No packet available to read at this time.  Sleep for a
+             * little while and try again. */
+            usleep(10000);
+            continue;
+        }
+        if (pkt_len > (int)sizeof(reporth)) {
 #ifdef EXTRA_DEBUG
             int i;
             fprintf(stderr, "Rcv %i bytes from %s:%i\n  ", pkt_len,
@@ -164,7 +204,7 @@ void listen_data(int sockfd) {
             }
             printf("\n");
 #endif
-            memcpy(&reporth, data, rhlen);
+            memcpy(&reporth, data, sizeof(reporth));
             if (reporth.proto == INT_REPORT_PROTO_LATENCY) {
                 process_legacy_report(data, pkt_len, ntohl(reporth.seq_num),
                                       ntohl(reporth.ts));
@@ -175,17 +215,17 @@ void listen_data(int sockfd) {
                 WPRT("Unknown report with INT proto: 0x%02x\n", reporth.proto);
             }
         }
-        usleep(10000);
     }
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv)
+{
     struct config cfg = {
         .port = DEFAULT_HOSTINTCOL_PORT,
         .bind_addr = "",
     };
-    strncpy(cfg.report_file, DEFAULT_HOSTINTCOL_REPORT_FILE,
-            sizeof(cfg.report_file));
+    snprintf(cfg.report_file, sizeof(cfg.report_file), "%s",
+             DEFAULT_HOSTINTCOL_REPORT_FILE);
 
     parse_cmdline_args(argc, argv, long_options, &cfg, __doc__);
 

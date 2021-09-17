@@ -34,8 +34,8 @@ case "${STYLE}" in
     clang-style)
 	# -i causes clang-format to edit the file in-place, i.e. to
 	# -overwrite the original file.
-	echo 'clang-format -i -style="{BasedOnStyle: llvm, IndentWidth: 4, SortIncludes: false}"' "$F" ...
-	clang-format -i -style="{BasedOnStyle: llvm, IndentWidth: 4, SortIncludes: false}" "$F"
+	echo 'clang-format -i -style="{BasedOnStyle: llvm, IndentWidth: 4, SortIncludes: false, BreakBeforeBraces: Linux}"' "$F" ...
+	clang-format -i -style="{BasedOnStyle: llvm, IndentWidth: 4, SortIncludes: false, BreakBeforeBraces: Linux}" "$F"
 	;;
     *)
 	1>&2 echo "Unknown style: $STYLE"

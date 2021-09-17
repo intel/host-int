@@ -99,6 +99,16 @@ struct int_metadata_entry {
     __be32 egress_ts;
 };
 
+// INT tail header, 4 bytes
+// See [INT05] Section 5.3.1 "Header Location and Format - INT over
+// TCP/UDP"
+struct int_tail_hdr {
+    __u8 proto;
+    __u8 dest_port_hi;
+    __u8 dest_port_lo;
+    __u8 reserved;
+};
+
 //////////////////////////////////////////////////////////////////////
 // INT report headers
 //////////////////////////////////////////////////////////////////////

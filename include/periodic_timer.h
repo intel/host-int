@@ -28,17 +28,22 @@ static void *_timer_thread(void *data);
 static pthread_t g_thread_id;
 static struct timer_node *g_head = NULL;
 
-int init_timers() {
+int init_timers()
+{
     if (pthread_create(&g_thread_id, NULL, _timer_thread, NULL)) {
-        /*Thread creation failed*/
+        /* Thread creation failed */
         return 0;
     }
 
     return 1;
 }
 
-size_t start_timer(unsigned int interval, time_handler handler,
-                   void *user_data) {
+/* start_timer
+ *
+ * interval - interval is specified in units of milliseconds.
+ */
+size_t start_timer(unsigned int interval, time_handler handler, void *user_data)
+{
     struct timer_node *new_node = NULL;
     struct itimerspec new_value;
 
@@ -61,25 +66,27 @@ size_t start_timer(unsigned int interval, time_handler handler,
     int seconds = 0;
     if (interval > 1000) {
         seconds = interval / 1000;
-        interval = interval - seconds * 10000;
+        interval = interval - seconds * 1000;
     }
-    // try to start the timer within one second
+    /* The first timer firing will be one millisecond, regardless of
+     * the period. */
     new_value.it_value.tv_sec = 0;
-    new_value.it_value.tv_nsec = interval * 1000000;
+    new_value.it_value.tv_nsec = 1000000;
 
     new_value.it_interval.tv_sec = seconds;
     new_value.it_interval.tv_nsec = interval * 1000000;
 
     timerfd_settime(new_node->fd, 0, &new_value, NULL);
 
-    /*Inserting the timer node into the list*/
+    /* Inserting the timer node into the list */
     new_node->next = g_head;
     g_head = new_node;
 
     return (size_t)new_node;
 }
 
-void stop_timer(size_t timer_id) {
+void stop_timer(size_t timer_id)
+{
     struct timer_node *tmp = NULL;
     struct timer_node *node = (struct timer_node *)timer_id;
 
@@ -98,7 +105,7 @@ void stop_timer(size_t timer_id) {
             tmp = tmp->next;
 
         if (tmp) {
-            /*tmp->next can not be NULL here*/
+            /* tmp->next can not be NULL here */
             tmp->next = tmp->next->next;
         }
     }
@@ -106,7 +113,8 @@ void stop_timer(size_t timer_id) {
         free(node);
 }
 
-void close_timers() {
+void close_timers()
+{
     while (g_head)
         stop_timer((size_t)g_head);
 
@@ -114,7 +122,8 @@ void close_timers() {
     pthread_join(g_thread_id, NULL);
 }
 
-struct timer_node *_get_timer_from_fd(int fd) {
+struct timer_node *_get_timer_from_fd(int fd)
+{
     struct timer_node *tmp = g_head;
 
     while (tmp) {
@@ -126,7 +135,8 @@ struct timer_node *_get_timer_from_fd(int fd) {
     return NULL;
 }
 
-void *_timer_thread(void *data) {
+void *_timer_thread(void *data)
+{
     struct pollfd ufds[MAX_TIMER_COUNT] = {{0}};
     int iMaxCount = 0;
     struct timer_node *tmp = NULL;
