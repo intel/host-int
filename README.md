@@ -8,10 +8,12 @@ we will usually refer to it as "Host-INT".
 What is Host-INT for packet-telemetry?
 
 * INT is [Inband Network Telemetry](https://p4.org/specs), a public
-  specification of header formats and report packet formats for network telemetry, published by the P4.org Applications Working Group.
+  specification of header formats and report packet formats for
+  network telemetry, published by the P4.org Applications Working
+  Group.
 * A data center operator can run the Host-INT software on any or all
   of the hosts in their network.
-  * All endpoints of a flow must be enabled for Host-INT
+  * All endpoints of a flow must be enabled for Host-INT.
   * Measures packet loss and one-way packet latency between enabled
     hosts in the network, independently for each application flow.
   * Instruments packets of selected TCP/UDP flows by adding INT
@@ -21,12 +23,12 @@ What is Host-INT for packet-telemetry?
     * Alternately, you may configure Host-INT to send telemetry data
       to an INT collector for network wide analysis, e.g. Intel's
       [Deep Insight Network Analytics
-      software](https://www.intel.com/content/www/us/en/products/network-io/programmable-ethernet-switch.html)
+      software](https://www.intel.com/content/www/us/en/products/network-io/programmable-ethernet-switch.html).
 * Future releases are planned to enable additional telemetry data
   measurement and collection, assisted by INT-enabled network
   switches, e.g. Intel
   [Tofino](https://www.intel.com/content/www/us/en/products/network-io/programmable-ethernet-switch.html)
-  programmable Ethernet switches
+  programmable Ethernet switches.
 
 This is an Alpha, pre-production project from Intel.  See the
 [`LICENSE`](LICENSE) file for information about the license under
@@ -53,9 +55,11 @@ headers to data packets.
 
 For details see [Host_INT_fmt.md](docs/Host_INT_fmt.md).
 
+
 # Supported systems
 
-This code has been compiled and tested primarily on 2 linux systems.
+This code has been compiled and tested primarily on these Linux
+distributions:
 
 * Ubuntu 20.04
 * Fedora 34
@@ -74,11 +78,23 @@ To obtain a copy of this project:
 git clone https://github.com/intel/host-int
 ```
 
-To install Ubuntu packages that are needed in order to compile the
-code:
+To install packages that are needed in order to compile the Host-INT
+code, choose the appropriate one of these commands, depending upon
+your Linux distribution:
 
 ```bash
+# For Ubuntu 20.04:
 $ ./host-int/scripts/build-setup-ubuntu.sh
+
+# For Fedora 34:
+$ ./host-int/scripts/build-setup-fedora.sh
+```
+
+The following command installs the version of the [libbpf
+library](https://github.com/libbpf/libbpf) that Host-INT has been
+tested with:
+
+```bash
 $ ./host-int/scripts/install-libbpf.sh
 ```
 
@@ -134,38 +150,47 @@ Host-INT may also work correctly with fewer of these features
 disabled.  This documentation will be updated when this has been
 tested to confirm.
 
+
 ## Reduce the TCP MSS
 
-In its initial release, Host-INT adds 36 bytes of INT headers to
-selected IPv4+TCP and IPv4+UDP packets.  It cannot add these headers
-if this would cause the modified packet to increase in size above the
-MTU configured for the outgoing interface.
+Host-INT adds at least 36 bytes of headers to selected IPv4+TCP and
+IPv4+UDP packets, with the precise amount depending upon which INT
+encapsulation you select.  Host-INT cannot add these headers if this
+would cause the modified packet to increase in size above the MTU
+configured for the outgoing interface.
 
 For TCP, one can ensure that sufficient room is available by
 configuring the Maximum Segment Size (MSS) of the output interface to
 be small enough.
 
-For INT_05_OVER_TCP_UDP the MSS should be configured to be 76 bytes less
-than the MTU of the interface.  This leaves room for 20 bytes for an IPv4
-header, plus 20 bytes for a TCP header without options, plus 36 bytes for
-the INT header.
-For INT_05_EXTENSION_UDP the MSS should be configured to be 76 + 8 bytes
-(length of outer udp header) less than the MTU of the interface.
+For encapsulation INT_05_OVER_TCP_UDP, the MSS should be configured to
+be 76 bytes less than the MTU of the interface.  This leaves room for
+20 bytes for an IPv4 header, plus 20 bytes for a TCP header without
+options, plus 36 bytes for the INT header.
 
-For example, if an interface `en0` on which Host-INT has been
-configured has an MTU of 1500 bytes, the following command can be used
-to configure its MSS to 1500 - 76 = 1424 bytes:
+For encapsulation INT_05_EXTENSION_UDP, the MSS should be configured
+to be 84 bytes less than the MTU of the interface.  This leaves room
+for the same headers described in the previous paragraph, plus 8 bytes
+for a new UDP header added to packets when using this encapsulation.
 
-For INT_05_OVER_TCP_UDP:
+For example, suppose you have an interface `en0` on which Host-INT has
+been configured with an MTU of 1500 bytes.  One of the following
+commands can be used.
+
+For encapsulation INT_05_OVER_TCP_UDP, an MTU of 1500 less 76 bytes of
+headers is 1424 bytes:
 
 ```bash
 ip route add 10.0.0.1/24 dev en0 advmss 1424
 ```
-For INT_05_EXTENSION_UDP:
+
+For encapsulation INT_05_EXTENSION_UDP, an MTU of 1500 less 84 bytes
+of headers is 1416 bytes:
 
 ```bash
 ip route add 10.0.0.1/24 dev en0 advmss 1416
 ```
+
 
 # Enabling hosts to receive packets with INT headers
 
@@ -203,28 +228,41 @@ sudo systemctl stop hostintd
 
 # Enabling hosts to send packets with INT headers
 
-Do this on a host that you wish to send packets with INT headers, to
-enable the Host-INT performance monitoring and debug features for
-packets sent from this host to hosts ready to receive them.
+Enabling a host as a source of INT packets is only supported if you
+first run the `hostintd` service on the host, as described above.
 
-```
+The same INT encapsulation must be used on all hosts where Host-INT is
+configured, where those hosts can communicate with each
+other. Host-INT will not work if hosts that communicate with each
+other use different INT encapsulations from each other.
+
+Run one of the following commands on any host from which you wish to
+send packets with INT headers.
+
+In case of encapsulation INT_05_OVER_TCP_UDP:
+```bash
 sudo hostintctl -d <interface> -T source --filename /usr/lib/hostint/intmd_tc_ksource.o --filter-filename <filter_file>
 ```
 
 where `<interface>` is the network interface that will be enabled to
 send out packets with INT headers.
 
+In case of encapsulation INT_05_EXTENSION_UDP:
+```bash
+sudo hostintctl -d <interface> -T source --filename /usr/lib/hostint/intmd_tc_uencap_ksource.o --filter-filename <filter_file>
+```
+
 INT headers should only be added to packets destined to hosts that are
 prepared to receive them, i.e. on which the `hostintd` service has
-been launched earlier.  Each host on which the source program is
-running must be configured with an allow list of destination hosts.
-The host will only add INT headers to a packet if the destination
+been launched earlier.  Each host on which the Host-INT source program
+is running must be configured with an allow list of destination hosts.
+The host will only add INT headers to a packet if the destination IP
 address is one in this allow list.
 
 You must create a file containing the allow list, and provide it on
 the command line as the `<filter_file>` parameter when enabling a host
-to send packets with INT headers This file must contain a list of host
-names and/or destination IPv4 addresses, one per line.
+to send packets with INT headers. This file must contain a list of
+host names and/or destination IPv4 addresses, one per line.
 
 For other available parameters, see the output of the command
 `hostinctctl -h`.
@@ -243,60 +281,36 @@ sudo hostintctl -d <interface> -T source -U
 
 ## Usage Example
 
-Checking packet latency when sending data from the host S interface
-`eth1` to the host R interface `eno1`
+In this example, we wish to monitor packet latency when sending data
+from the host S using interface `eth1`, to the host R using interface
+`eno1`, using INT encapsulation INT_05_OVER_TCP_UDP.
 
-* On the host S:
+It is best to start the `hostintd` service on all hosts first, before
+enabling any hosts as senders of packets with INT headers.  If you
+enable a host S to send packets with INT headers to a host R where the
+`hostintd` service is not yet running, TCP and UDP applications from
+host S to host R will either fail completely, or perhaps the receiving
+application will see INT headers added to the data.
+
+* On both hosts S and R:
  1. Install Host-INT software, following the steps above.
- 2. edit `/etc/hostintd.cfg` for INT_05_OVER_TCP_UDP with below content
+ 2. Edit `/etc/hostintd.cfg` with below content on host S:
     ```
     DEV=eth1
     NODEID=2
     OPT=-v 0x04 -m 0x04 -B 5000,10000,20000,40000,60000,120000 -E int_05_over_tcp_udp --filename /usr/lib/hostint/intmd_xdp_ksink.o -o /var/log/hostintd_report.log
     ```
-
-    edit `/etc/hostintd.cfg` for INT_05_EXTENSION_UDP with below content
-    ```
-    DEV=eth1
-    NODEID=2
-    OPT=-v 0x04 -m 0x04 -B 5000,10000,20000,40000,60000,120000 -E int_05_extension_udp --filename /usr/lib/hostint/intmd_xdp_uencap_ksink.o -o /var/log/hostintd_report.log
-   ```
-   NOTE: Same encapsulation must be used on all hosts where Host-INT is
-   configured, where those hosts can communicate with each other. Host-INT
-   will not work if hosts that communicate with each other use different
-   INT encapsulations from each other.
- 3. launch hostintd service
+    Use the same `/etc/hostintd.cfg` contents on host R as on host S,
+    except change the value of `DEV` to `en0`, and the value of
+    `NODEID` to 3.
+ 3. launch the `hostintd` service
     ```
     sudo systemctl start hostintd
     ```
- 4. load source EBPF program
-    In case of INT_05_OVER_TCP_UDP:
+* On host S only:
+ 1. load source EBPF program
     ```
     sudo hostintctl -d eth1 -T source --filename /usr/lib/hostint/intmd_tc_ksource.o --filter-filename filter.txt
-    ```
-    In case of INT_05_EXTENSION_UDP:
-    ```
-    sudo hostintctl -d eth1 -T source --filename /usr/lib/hostint/intmd_tc_uencap_ksource.o --filter-filename filter.txt
-    ```
-* On the host R:
- 1. Install Host-INT software, following the steps above.
- 2. edit /etc/hostintd.cfg with below content
-    edit `/etc/hostintd.cfg` for INT_05_OVER_TCP_UDP with below content
-    ```
-    DEV=eno1
-    NODEID=3
-    OPT=-v 0x04 -m 0x04 -B 5000,10000,20000,40000,60000,120000 -E int_05_over_tcp_udp --filename /usr/lib/hostint/intmd_xdp_ksink.o -o /var/log/hostintd_report.log
-    ```
-    edit `/etc/hostintd.cfg` for INT_05_EXTENSION_UDP with below content
-    ```
-    DEV=eno1
-    NODEID=3
-    OPT=-v 0x04 -m 0x04 -B 5000,10000,20000,40000,60000,120000 -E int_05_extension_udp --filename /usr/lib/hostint/intmd_xdp_uencap_ksink.o -o /var/log/hostintd_report.log
-    ```
-    NOTE: the host R has NODEID=3, while the host S has NODEID=2
- 3. launch hostintd service
-    ```
-    sudo systemctl start hostintd
     ```
 * send a packet from the host S to the host R
 * check packet latency
@@ -306,8 +320,7 @@ Checking packet latency when sending data from the host S interface
       Source  NodeID: 2 IngressPort: 13 EgressPort: 13 IngressTS: 1037040573 ns EgressTS: 1037040573 ns
       Sink    NodeID: 3 IngressPort: 12 EgressPort: 12 IngressTS: 1037050488 ns EgressTS: 1037050488 ns
     ```
- 2. Calculate latency
-
+ 2. Calculate latency:
     The packet latency is `1037050488 - 1037040573 = 9915 ns`
 
 
@@ -336,18 +349,18 @@ Checking packet latency when sending data from the host S interface
 
 ## Limitations specific to UDP packets
 
-* For INT_05_OVER_TCP_UDP, the maximum UDP payload length is the interface
-  MTU minus 64 bytes (20-byte IPv4 header + 8-byte UDP header +
-  36-byte INT headers = 64 bytes)
+* For encapsulation INT_05_OVER_TCP_UDP, the maximum UDP payload
+  length is the interface MTU minus 64 bytes (20-byte IPv4 header +
+  8-byte UDP header + 36-byte INT headers = 64 bytes)
+* For encapsulation INT_05_EXTENSION_UDP, the maximum UDP payload
+  length is the interface MTU minus 72 bytes (20-byte IPv4 header +
+  8-byte new UDP header + 36-byte INT headers + 8-byte original UDP
+  header = 72 bytes)
+  * These are the maximum payload lengths for UDP packets for which
+    the source host will add INT headers to them. The Host-INT project
+    allows applications to send larger UDP payloads, too, but INT
+    headers will not be added to those packets.
 
-* For INT_05_EXTENSION_UDP, the maximum UDP payload length is the interface
-  MTU minus 72 bytes (20-byte IPv4 header + 8-byte new UDP header +
-  36-byte INT headers + 8-byte original UDP header = 72 bytes)
-
-  * These are the maximum payload lengths for UDP packets for which the
-    source host will add INT headers to them. The Host-INT project allows
-    applications to send larger UDP payload, too. But INT headers will not
-    be added to those packets.
 
 ## Limitations specific to TCP packets
 
@@ -359,12 +372,12 @@ Checking packet latency when sending data from the host S interface
   add INT headers to IPv4+TCP packets sent.  If you do not do so, TCP
   packets that are MTU size or slightly smaller will be sent without
   INT headers added.
-* This release of Host-INT software reduces the throughput of TCP
-  traffic quite significantly, in part because the choices made for
-  adding INT headers led us to calculate a full TCP payload checksum
-  on every TCP packet sent with INT headers added.  We will find
-  improvements for this performance, perhaps by using other choices
-  for how INT headers are added to TCP packets.
+* When using encapsulation INT_05_OVER_TCP_UDP, the only way we have
+  found using the available EBPF helper functions to send packets with
+  correct TCP checksums is to calculate a full TCP payload checksum on
+  every TCP packet sent with INT headers added.  We hope to find ways
+  to avoid this.  There is never any need to calculate TCP payload
+  checksums when using encapsulation INT_05_EXTENSION_UDP.
 
 
 ### TCP superpackets
