@@ -26,3 +26,4 @@ install: all
 	@for d in $(SUBDIRS);  do \
 		( cd $$d && $(MAKE) install ); \
 	done
+	setcap 'CAP_SYS_RESOURCE=+ep' $(DESTDIR)$(SBINDIR)/hostintd

@@ -33,7 +33,6 @@
 //#include "intmx_headers.h"
 #include "uutils.h"
 
-static int global_report_seq_num = 1;
 static pthread_mutex_t seq_num_lock;
 
 static int done;
@@ -42,17 +41,15 @@ static void sig_handler(int signo)
     DPRT("Caught signal. Stop program...\n");
     done = 1;
 }
-static int source_config_map_fd = -1;
-static int source_flow_stats_map_fd = -1;
 static int sink_config_map_fd = -1;
 static char collector_name[512];
 static int collector_port = -1;
 static int sender_collector_port = -1;
 static FILE *report_file;
+static int report_with_switch_id = false;
+__u32 sink_node_id;
 // can change when we reload cfg
 static uint64_t sink_idle_flow_timeout_ns, sink_pkt_loss_timeout_ns;
-
-static uint64_t time_offset;
 
 static const char *__doc__ =
     "INT Edge-to-Edge User Space Program that loads in sink EBPF program, and\n"
@@ -101,6 +98,11 @@ static const struct option_wrapper long_options[] = {
      "the UDP-encapsulation EBPF sink program will be dropped, and not sent "
      "onwards to the Linux kernel."},
 
+    {{"no-sw-id-after-report-hdr", no_argument, NULL, 'Y'},
+     "When this option is present latency reports will not have an additional"
+     " copy of the sink host's node id inserted after the Telemetry Report "
+     "Fixed Header, and before the IPv4 header."},
+
     {{"report-output", required_argument, NULL, 'o'},
      "Report output file. An empty string indicates do not report data to a "
      "file. Default is " DEFAULT_HOSTINTD_REPORT_FILE "."},
@@ -124,10 +126,11 @@ void cleanup()
 
 int get_next_report_seq_num(void)
 {
+    static int report_seq_num = 1;
     int ret;
     pthread_mutex_lock(&seq_num_lock);
-    ret = global_report_seq_num;
-    global_report_seq_num += 1;
+    ret = report_seq_num;
+    report_seq_num += 1;
     pthread_mutex_unlock(&seq_num_lock);
     return ret;
 }
@@ -177,6 +180,8 @@ int update_time_offset_map(int map_fd, uint64_t time_offset, char *map_name)
 
 void update_time_offset(size_t timer_id, void *params)
 {
+    static int source_config_map_fd = -1;
+    static uint64_t time_offset = 0;
     uint64_t new_offset = get_time_offset();
     if (!new_offset) {
         return;
@@ -306,11 +311,21 @@ static int process_ebpf_perf_event_from_sink(void *data, int size)
     __u32 int_rpt_body_part3_len =
         (sizeof(struct int_metadata_entry) + sizeof(seq_num));
 
+    __u32 pkt_len = 0;
     /* populate buffer */
-    __u32 pkt_len = (int_rpt_body_part1_len + int_rpt_body_part2_len +
-                     int_rpt_body_part3_len);
+    if (report_with_switch_id == 1) {
+        pkt_len = (int_rpt_body_part1_len + int_rpt_body_part2_len +
+                   int_rpt_body_part3_len + sizeof(sink_node_id));
+    } else {
+        pkt_len = (int_rpt_body_part1_len + int_rpt_body_part2_len +
+                   int_rpt_body_part3_len);
+    }
     __u8 buffer[pkt_len];
     __u32 offset = 0;
+    if (report_with_switch_id == 1) {
+        memcpy(&buffer[offset], &intmdsink, sizeof(sink_node_id));
+        offset += sizeof(sink_node_id);
+    }
     memcpy(&buffer[offset], &(e->pkt_data[int_rpt_body_part1_offset]),
            int_rpt_body_part1_len);
     offset += int_rpt_body_part1_len;
@@ -461,11 +476,23 @@ static int process_ebpf_perf_event_from_sink_without_encap(void *data, int size)
      * e->pkt_data starting at the part3 offset calculated below. */
 
     /* populate buffer */
-    __u32 pkt_len = (int_rpt_body_part1_len + int_rpt_body_part2_len +
-                     int_rpt_body_part3_len + int_rpt_body_part4_len +
-                     int_rpt_body_part5_len);
+    __u32 pkt_len;
+
+    if (report_with_switch_id == 1) {
+        pkt_len = (sizeof(sink_node_id) + int_rpt_body_part1_len +
+                   int_rpt_body_part2_len + int_rpt_body_part3_len +
+                   int_rpt_body_part4_len + int_rpt_body_part5_len);
+    } else {
+        pkt_len = (int_rpt_body_part1_len + int_rpt_body_part2_len +
+                   int_rpt_body_part3_len + int_rpt_body_part4_len +
+                   int_rpt_body_part5_len);
+    }
     __u8 buffer[pkt_len];
     __u32 offset = 0;
+    if (report_with_switch_id == 1) {
+        memcpy(&buffer[offset], &intmdsink, sizeof(sink_node_id));
+        offset += sizeof(sink_node_id);
+    }
     memcpy(&buffer[offset], &(e->pkt_data[int_rpt_body_part1_offset]),
            int_rpt_body_part1_len);
     struct iphdr *iph2 = (struct iphdr *)&buffer[offset];
@@ -645,6 +672,7 @@ static int send_drop_summary_report(struct flow_key *key,
 void clear_source_idle_flows(size_t timer_id, void *params)
 {
     uint64_t idle_flow_timeout_ns = sink_idle_flow_timeout_ns;
+    static int source_flow_stats_map_fd = -1;
     // check map file
     if (source_flow_stats_map_fd < 0) {
         struct bpf_map_info info = {0};
@@ -859,9 +887,15 @@ static void reload_handler()
     if (ret < 0) {
         EPRT("Failed to get idle flow timeout from %s\n", SINK_MAP_CONFIG);
     } else {
-        sink_idle_flow_timeout_ns = (uint64_t)val * MILLI_TO_NANO;
-        VPRT("Updated sink idle flow timeout to %" PRIu64 " ns\n",
-             sink_idle_flow_timeout_ns);
+        if (val <= MAX_IDLE_FLOW_TIMEOUT_MS) {
+            sink_idle_flow_timeout_ns = (uint64_t)val * MILLI_TO_NANO;
+            VPRT("Updated sink idle flow timeout to %" PRIu64 " ns\n",
+                 sink_idle_flow_timeout_ns);
+        } else {
+            EPRT("Value %d from the map is larger than the maximum "
+                 "supported value of %d ms\n",
+                 val, MAX_IDLE_FLOW_TIMEOUT_MS);
+        }
     }
 
     key = CONFIG_MAP_KEY_PKTLOSS_TO;
@@ -869,9 +903,15 @@ static void reload_handler()
     if (ret < 0) {
         EPRT("Failed to get packet loss timeout from %s\n", SINK_MAP_CONFIG);
     } else {
-        sink_pkt_loss_timeout_ns = (uint64_t)val * MILLI_TO_NANO;
-        VPRT("Updated sink packet loss timeout to %" PRIu64 " ns\n",
-             sink_pkt_loss_timeout_ns);
+        if (val <= MAX_PKT_LOSS_TIMEOUT_MS) {
+            sink_pkt_loss_timeout_ns = (uint64_t)val * MILLI_TO_NANO;
+            VPRT("Updated sink packet loss timeout to %" PRIu64 " ns\n",
+                 sink_pkt_loss_timeout_ns);
+        } else {
+            EPRT("Value %d from the map is larger than the maximum "
+                 "supported value of %d ms\n",
+                 val, MAX_PKT_LOSS_TIMEOUT_MS);
+        }
     }
 }
 
@@ -879,6 +919,7 @@ int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IOLBF, 0);
     struct rlimit r = {RLIM_INFINITY, RLIM_INFINITY};
+    struct rlimit r_core;
 
     int perf_map_fd;
     int flow_stats_map_fd;
@@ -909,6 +950,7 @@ int main(int argc, char **argv)
         .server_hostname = "",
         .server_port = -1,
         .drop_packet = false,
+        .sw_id_after_report_hdr = true,
         .sender_collector_port = -1,
         .num_latency_entries = 0,
         .encap_type = -1,
@@ -919,6 +961,11 @@ int main(int argc, char **argv)
     snprintf(cfg.filename, sizeof(cfg.filename), "%s", DEFAULT_KSINK_FILE);
 
     if (pthread_mutex_init(&seq_num_lock, NULL) != 0) {
+        EPRT("Mutex init failed.\n");
+        return EXIT_FAIL;
+    }
+
+    if (init_send_packet_lock() != 0) {
         EPRT("Mutex init failed.\n");
         return EXIT_FAIL;
     }
@@ -957,11 +1004,15 @@ int main(int argc, char **argv)
         return EXIT_FAIL_OPTION;
     }
 
-    sink_idle_flow_timeout_ns =
-        (uint64_t)cfg.idle_flow_timeout_ms * MILLI_TO_NANO;
+    if (cfg.idle_flow_timeout_ms <= MAX_IDLE_FLOW_TIMEOUT_MS) {
+        sink_idle_flow_timeout_ns =
+            (uint64_t)cfg.idle_flow_timeout_ms * MILLI_TO_NANO;
+    }
 
-    sink_pkt_loss_timeout_ns =
-        (uint64_t)cfg.pkt_loss_timeout_ms * MILLI_TO_NANO;
+    if (cfg.pkt_loss_timeout_ms <= MAX_PKT_LOSS_TIMEOUT_MS) {
+        sink_pkt_loss_timeout_ns =
+            (uint64_t)cfg.pkt_loss_timeout_ms * MILLI_TO_NANO;
+    }
 
     if (cfg.server_hostname[0]) {
         snprintf(collector_name, sizeof(collector_name), "%s",
@@ -990,6 +1041,28 @@ int main(int argc, char **argv)
         perror("setrlimit(RLIMIT_MEMLOCK)");
         return EXIT_FAIL;
     }
+
+    if (getrlimit(RLIMIT_CORE, &r_core)) {
+        perror("getrlimit(RLIMIT_CORE)");
+        return EXIT_FAIL;
+    }
+    VPRT("Max coredump file size soft:%lu hard:%lu\n", r_core.rlim_cur,
+         r_core.rlim_max);
+
+    r_core.rlim_cur = 100UL * 1024UL * 1024UL;
+    r_core.rlim_max = 100UL * 1024UL * 1024UL;
+
+    if (setrlimit(RLIMIT_CORE, &r_core)) {
+        perror("setrlimit(RLIMIT_CORE)");
+        return EXIT_FAIL;
+    }
+
+    if (getrlimit(RLIMIT_CORE, &r_core)) {
+        perror("getrlimit(RLIMIT_CORE)");
+        return EXIT_FAIL;
+    }
+    VPRT("Max coredump file size soft:%lu hard:%lu\n", r_core.rlim_cur,
+         r_core.rlim_max);
 
     len = snprintf(cfg.pin_dir, sizeof(cfg.pin_dir), "%s/%s", PIN_BASE_DIR,
                    cfg.ifname);
@@ -1129,6 +1202,10 @@ int main(int argc, char **argv)
             return EXIT_FAIL_BPF;
         }
         VPRT("Set drop packet to (%i) in sink config map\n", cfg.drop_packet);
+    }
+
+    if (cfg.sw_id_after_report_hdr) {
+        report_with_switch_id = 1;
     }
 
     test_bpf_perf_event(perf_map_fd, numcpus);

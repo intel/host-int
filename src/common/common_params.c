@@ -140,9 +140,10 @@ void parse_cmdline_args(int argc, char **argv,
     }
 
     /* Parse commands line args */
-    while ((opt = getopt_long(
-                argc, argv, "hd:r:ASNFUMVQ:czpqf:n:v:m:t:l:s:i:C:P:o:b:T:B:E:D",
-                long_options, &longindex)) != -1) {
+    while (
+        (opt = getopt_long(argc, argv,
+                           "hd:r:ASNFUMVQ:czpqf:n:v:m:t:l:s:i:C:P:o:b:T:B:E:DY",
+                           long_options, &longindex)) != -1) {
         switch (opt) {
         case 'd':
             if (strlen(optarg) >= IF_NAMESIZE) {
@@ -244,9 +245,24 @@ void parse_cmdline_args(int argc, char **argv,
             break;
         case 't':
             cfg->idle_flow_timeout_ms = atoi(optarg);
+            if (cfg->idle_flow_timeout_ms > MAX_IDLE_FLOW_TIMEOUT_MS) {
+                fprintf(
+                    stderr,
+                    "Error: Value %d given for option --idle-flow-timeout-ms"
+                    "is larger than maximum supported value of %d ms\n",
+                    cfg->idle_flow_timeout_ms, MAX_IDLE_FLOW_TIMEOUT_MS);
+                goto error;
+            }
             break;
         case 'l':
             cfg->pkt_loss_timeout_ms = atoi(optarg);
+            if (cfg->pkt_loss_timeout_ms > MAX_PKT_LOSS_TIMEOUT_MS) {
+                fprintf(stderr,
+                        "Error: Value %d given for option --pkt_loss-timeout-ms"
+                        "is larger than maximum supported value of %d ms\n",
+                        cfg->pkt_loss_timeout_ms, MAX_PKT_LOSS_TIMEOUT_MS);
+                goto error;
+            }
             break;
         case 'C': /* --server_hostname */
             dest = (char *)&cfg->server_hostname;
@@ -341,6 +357,9 @@ void parse_cmdline_args(int argc, char **argv,
             break;
         case 'D':
             cfg->drop_packet = true;
+            break;
+        case 'Y':
+            cfg->sw_id_after_report_hdr = false;
             break;
         case 'h':
             full_help = true;

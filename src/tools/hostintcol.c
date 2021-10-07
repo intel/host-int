@@ -23,14 +23,16 @@
 #define DEFAULT_HOSTINTCOL_PORT 36166
 #define MAX_PKT_SIZE 1152 // SAMPLE_SIZE(1024) + 128
 
+static int report_with_switch_id = 0;
+
 static const int tcp_int_meta_offset =
     sizeof(struct int_report_hdr) + sizeof(struct iphdr) +
     sizeof(struct tcphdr) + sizeof(struct int_shim_hdr) +
-    sizeof(struct int_metadata_hdr);
+    sizeof(struct int_metadata_hdr) + sizeof(__u32);
 static const int udp_int_meta_offset =
     sizeof(struct int_report_hdr) + sizeof(struct iphdr) +
     sizeof(struct udphdr) + sizeof(struct int_shim_hdr) +
-    sizeof(struct int_metadata_hdr);
+    sizeof(struct int_metadata_hdr) + sizeof(__u32);
 static FILE *report_file;
 
 static int done;
@@ -58,6 +60,11 @@ static const struct option_wrapper long_options[] = {
     {{"bind", required_argument, NULL, 'b'},
      "Bind IP address used to receive reports from hostintd"},
 
+    {{"no_sw_id_after_report_hdr", no_argument, NULL, 'y'},
+     "When this option is present latency reports will not have an "
+     "additional copy of the sink host's node id inserted after the "
+     "Telemetry Report Fixed Header, and before the IPv4 header."},
+
     {{"port", required_argument, NULL, 6},
      "Port number used to receive reports from hostintd"},
 
@@ -73,14 +80,16 @@ void cleanup()
 
 int launch_udp_receiver(char *ip_addr, int port)
 {
-    int sockfd;
     struct sockaddr_in server_addr = {0};
+    int sockfd = -1;
+    int ret;
 
     /* socket: create the socket */
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0) {
         EPRT("Opening socket (%i) failed : %s\n", sockfd, strerror(errno));
-        return -EXIT_FAIL;
+        ret = -1;
+        goto error_out;
     }
 
     server_addr.sin_family = AF_INET; // IPv4
@@ -92,7 +101,8 @@ int launch_udp_receiver(char *ip_addr, int port)
         struct in_addr addr;
         if (inet_aton(ip_addr, &addr) == 0) {
             EPRT("Invalid IP address: '%s'\n", ip_addr);
-            return -EXIT_FAIL_OPTION;
+            ret = -1;
+            goto error_out;
         }
         server_addr.sin_addr.s_addr = addr.s_addr;
         VPRT("Will bind to %s:%i\n", ip_addr, port);
@@ -101,12 +111,17 @@ int launch_udp_receiver(char *ip_addr, int port)
     if (bind(sockfd, (const struct sockaddr *)&server_addr,
              sizeof(server_addr)) < 0) {
         EPRT("Failed to bind socket (%i) : %s\n", sockfd, strerror(errno));
-        close(sockfd);
-        return -EXIT_FAIL;
+        ret = -1;
+        goto error_out;
     }
     VPRT("Bind successfully\n");
-
     return sockfd;
+
+error_out:
+    if (sockfd >= 0) {
+        close(sockfd);
+    }
+    return ret;
 }
 
 void get_flow_key(struct flow_key *out_key, __u8 *data, int len, int iph_offset)
@@ -132,15 +147,29 @@ void get_flow_key(struct flow_key *out_key, __u8 *data, int len, int iph_offset)
 void process_legacy_report(__u8 *data, int len, __u32 seq_num, __u32 ts)
 {
     struct flow_key key;
-    int offset = sizeof(struct int_report_hdr);
+    int offset;
+
+    if (report_with_switch_id == 1) {
+        offset = sizeof(struct int_report_hdr) + sizeof(__u32);
+    } else {
+        offset = sizeof(struct int_report_hdr);
+    }
     struct iphdr *iph = (struct iphdr *)&(data[offset]);
     get_flow_key(&key, data, len, offset);
     __u8 ip_protocol = iph->protocol;
     int int_meta_offset = 0;
     if (ip_protocol == IPPROTO_UDP) {
-        int_meta_offset = udp_int_meta_offset;
+        if (report_with_switch_id == 1) {
+            int_meta_offset = udp_int_meta_offset;
+        } else {
+            int_meta_offset = udp_int_meta_offset - sizeof(__u32);
+        }
     } else if (ip_protocol == IPPROTO_TCP) {
-        int_meta_offset = tcp_int_meta_offset;
+        if (report_with_switch_id == 1) {
+            int_meta_offset = tcp_int_meta_offset;
+        } else {
+            int_meta_offset = tcp_int_meta_offset - sizeof(__u32);
+        }
     } else {
         WPRT("Unknown report with IP proto: 0x%02x\n", ip_protocol);
         return;
@@ -222,6 +251,7 @@ int main(int argc, char **argv)
 {
     struct config cfg = {
         .port = DEFAULT_HOSTINTCOL_PORT,
+        .sw_id_after_report_hdr = true,
         .bind_addr = "",
     };
     snprintf(cfg.report_file, sizeof(cfg.report_file), "%s",
@@ -237,6 +267,10 @@ int main(int argc, char **argv)
         } else {
             VPRT("Will print report to file %s\n", cfg.report_file);
         }
+    }
+
+    if (cfg.sw_id_after_report_hdr) {
+        report_with_switch_id = 1;
     }
 
     int sockfd = launch_udp_receiver(cfg.bind_addr, cfg.port);

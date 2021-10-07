@@ -222,15 +222,19 @@ int source_egress_func(struct __sk_buff *skb)
     }
 
     if ((int)oldlen > (DEFAULT_MTU - int_hdr_len)) {
+#ifdef EXTRA_DEBUG
         bpf_printk(PROG_NAME
                    " IP length too big ip_length=%d"
                    " - forwarding packet with no modifications made\n",
                    (int)oldlen);
+#endif
         return rc;
     }
 
     if ((bpf_ntohs(iph->frag_off) & IPV4_FRAG_OFFSET_MASK) != 0) {
+#ifdef EXTRA_DEBUG
         bpf_printk(PROG_NAME " Not a first IPv4 fragment packet");
+#endif
         return rc;
     }
 

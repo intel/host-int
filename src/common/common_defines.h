@@ -10,7 +10,7 @@
 #include <stdbool.h>
 #include "intbpf.h"
 
-#define VERSION "0.1.0-alpha"
+#define VERSION "0.1.1-alpha"
 
 #define PT_SINK 1
 #define PT_SOURCE 2
@@ -46,6 +46,7 @@ struct config {
     char report_file[512];
     int sender_collector_port;
     bool drop_packet;
+    bool sw_id_after_report_hdr;
     int port;
     char bind_addr[16];
     int prog_type;
@@ -87,6 +88,8 @@ extern int verbose;
 
 #define COLLECTOR_HOSTNAME "127.0.0.1"
 #define COLLECTOR_PORT 32766
+#define MAX_IDLE_FLOW_TIMEOUT_MS 600000
+#define MAX_PKT_LOSS_TIMEOUT_MS 600000
 
 // Common params between source and sink
 #define DEFAULT_IDLE_FLOW_TIMEOUT_MS 2000

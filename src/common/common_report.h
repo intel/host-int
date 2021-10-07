@@ -25,4 +25,5 @@ void print_drop_report(FILE *out, struct int_drop_summary_data *data,
                        int report_seq_num, struct timespec *ts,
                        struct flow_key *key);
 
+int init_send_packet_lock();
 #endif /* __COMMON_REPORT_H */

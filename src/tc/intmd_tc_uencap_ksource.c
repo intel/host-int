@@ -33,6 +33,7 @@
 
 #define MAX_L4_HDR_LEN sizeof(struct tcphdr)
 #undef TRY_ADDING_INT_TO_TCP_SUPERPACKETS
+#undef FLOW_DEBUG
 
 #define UDP_CSUM_OFF                                                           \
     (ETH_HLEN + sizeof(struct iphdr) + offsetof(struct udphdr, check))
@@ -158,16 +159,20 @@ int source_egress_func(struct __sk_buff *skb)
                              " - adding UDP + INT header anyway\n",
                    (int)oldlen, (int)total_int_len_with_int_udp);
 #else
+#ifdef EXTRA_DEBUG
         bpf_printk(PROG_NAME
                    " IP length too big ip_length=%d"
                    " - forwarding packet with no modifications made\n",
                    (int)oldlen);
+#endif
         return rc;
 #endif // TRY_ADDING_INT_TO_TCP_SUPERPACKETS
     }
 
     if ((bpf_ntohs(iph->frag_off) & IPV4_FRAG_OFFSET_MASK) != 0) {
+#ifdef EXTRA_DEBUG
         bpf_printk(PROG_NAME " Not a first IPv4 fragment packet");
+#endif
         return rc;
     }
 
@@ -226,7 +231,6 @@ int source_egress_func(struct __sk_buff *skb)
         return rc;
     }
 
-#define FLOW_DEBUG
 #ifdef FLOW_DEBUG
     char buf[SPRINTF_FLOW_KEY_HEX_BUF_SIZE];
     sprintf_flow_key_hex(buf, &key);

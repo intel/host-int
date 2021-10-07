@@ -1,3 +1,35 @@
+# Changes to Host-INT for Packet Telemetry in version 0.1.1-alpha
+
+## New features
+
+* Change the format of latency INT reports to add the node ID of the
+  sink host generating the report after the Telemetry Report Fixed
+  Header, before the IP header of the packet that caused the latency
+  INT report to be generated.  This can make it easier for the
+  receiver of the INT reports to determine the source of the report,
+  even when there are NAT devices that may have modified the IP and/or
+  UDP header of the report packet between the host sending the report
+  and the report collector.  The old latency INT report format can
+  still be enabled with the new `--no-sw-id-after-report-hdr` command
+  line option to `hostintd`.
+
+* Start `hostintd` enabled to write core dump files if it crashes.
+
+
+## Fixes
+
+* Fix a multi-threading bug in `hostintd` where it could crash if one
+  thread was attempting to send a latency report while another was
+  attempting to send a drop report.
+
+* Additional multi-threaded safety improvements.
+
+* Replace all calls to the obsolete `gethostbyname(3)` with
+  `getaddrinfo(3)`.
+
+* Fixed issues found by static analysis.
+
+
 # Changes to Host-INT for Packet Telemetry in version 0.1.0-alpha
 
 ## New features

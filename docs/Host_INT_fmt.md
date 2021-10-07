@@ -15,11 +15,12 @@ two different encapsulations for adding INT headers to data packets.
 
 INT_05_OVER_TCP_UDP:
 
-INT_05_OVER_TCP_UDP uses the option of modifying the DSCP field inside of the IPv4
-header's Type of Service field to distinguish between packets with INT
-headers versus those without, with the assumption that network
+INT_05_OVER_TCP_UDP uses the option of modifying the DSCP field inside
+of the IPv4 header's Type of Service field to distinguish between packets
+with INT headers versus those without, with the assumption that network
 administrators will dedicate one or more DSCP values for this purpose
-in their network.
+in their network. The IPv4 DSCP field is not restored back to its
+original value when removing the INT headers at the sink host.
 
 INT_05_EXTENSION_UDP:
 
@@ -282,18 +283,34 @@ Header (12 octets)" of [TR05].
 [The figure above corresponds to `struct int_report_hdr` in Host INT
 code.]
 
-
 ## INT/IPv4 Report
+
+An INT/IPv4 report begins with a report common header and sink node id
+following it.
+
+```
+0                   1                   2                   3
+0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|  Ver  |NProto |D|Q|F|          Reserved           |   hw_id   |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                      Report Sequence Number                   |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                          Report Timestamp                     |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                            sink node ID                       |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+```
 
 An INT/IPv4 report begins with a report common header with the
 `NProto` field equal to 4, indicating that the first header after the
-report common header is IPv4, not Ethernet.
+report common header and sink node id is IPv4, not Ethernet.
 
-After the report common header is the beginning of the data packet
-that caused the report to be generated, starting with its IPv4 header.
-The portion of the data packet that is included in the report is at
-least until the end of all INT headers in the packet.  The INT headers
-included will be as updated in a sink host, as described in [this
+After the report common header and sink node id is the beginning of the
+data packet that caused the report to be generated, starting with its
+IPv4 header. The portion of the data packet that is included in the report
+is at least until the end of all INT headers in the packet.  The INT
+headers included will be as updated in a sink host, as described in [this
 section](#Combined-INT-header-sequence-in-packets-processed-by-sink-hosts).
 
 In these reports, the **F** field is 1.

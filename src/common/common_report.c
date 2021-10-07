@@ -12,6 +12,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
+#include <pthread.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -19,11 +20,18 @@
 #define T_LATENCY "Latency"
 #define T_DROP "Drop"
 
+static pthread_mutex_t send_packet_lock;
+
 /* buf must point at a buffer that is large enough to hold a string of
  * 16 characters, which includes up to 15 regular characters followed
  * by the null terminator of the C string. */
 
 #define IPV4_ADDR_DOTTED_DECIMAL_BUF_SIZE 16
+
+int init_send_packet_lock()
+{
+    return pthread_mutex_init(&send_packet_lock, NULL);
+}
 
 void sprintf_ipv4_addr_dotted_decimal(char *buf,
                                       __u32 ipv4_addr_network_byte_order)
@@ -40,49 +48,85 @@ void sprintf_ipv4_addr_dotted_decimal(char *buf,
 int send_packet(char *server_name, __u32 server_addr, int server_port,
                 __u16 pkt_len, __u8 *pkt_data)
 {
-    int sockfd, n;
+    int sockfd = -1;
     int serverlen;
+    int ret = 0;
     struct sockaddr_in serveraddr;
+    struct addrinfo hints;
+    struct addrinfo *result, *rp;
+    char server_port_str[64];
+    result = NULL;
+    int n;
 
-    /* socket: create the socket */
-    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd < 0) {
-        EPRT("Opening socket (%i) failed\n", sockfd);
-        close(sockfd);
-        return -1;
-    }
-
-    /* build the server's Internet address */
-    bzero((char *)&serveraddr, sizeof(serveraddr));
-    serveraddr.sin_family = AF_INET;
+    pthread_mutex_lock(&send_packet_lock);
     if (server_name) {
-        /* gethostbyname: get the server's DNS entry */
-        struct hostent *server = gethostbyname(server_name);
-        if (server == NULL) {
-            EPRT("No such host as '%s'\n", server_name);
-            close(sockfd);
-            return -1;
+        memset(&hints, 0, sizeof(struct addrinfo));
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_DGRAM;
+        hints.ai_flags = 0;
+        hints.ai_protocol = 0; /* Any protocol */
+        snprintf(server_port_str, sizeof(server_port_str), "%d", server_port);
+        ret = getaddrinfo(server_name, server_port_str, &hints, &result);
+        if (ret != 0) {
+            EPRT("Error from getaddrinfo for server '%s': %s\n", server_name,
+                 gai_strerror(ret));
+            ret = -1;
+            goto out;
         }
-        bcopy((char *)server->h_addr, (char *)&serveraddr.sin_addr.s_addr,
-              server->h_length);
+        // debug_print_getaddrinfo_results(result);
+        for (rp = result; rp != NULL; rp = rp->ai_next) {
+            sockfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+            if (sockfd != -1) {
+                break;
+            }
+        }
+        if (rp == NULL) {
+            EPRT("Could not create socket\n");
+            ret = -1;
+            goto out;
+        }
+        if (sendto(sockfd, pkt_data, pkt_len, 0, rp->ai_addr, rp->ai_addrlen) ==
+            -1) {
+            EPRT("sendto failed\n");
+            perror("sendto failure");
+            ret = -1;
+            goto out;
+        }
+        VPRT("Report packet sent of length: %u\n", pkt_len);
     } else {
+        sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+        if (sockfd < 0) {
+            EPRT("Opening socket (%i) failed\n", sockfd);
+            ret = -1;
+            goto out;
+        }
+        bzero((char *)&serveraddr, sizeof(serveraddr));
+        serveraddr.sin_family = AF_INET;
         serveraddr.sin_addr.s_addr = server_addr;
+        serveraddr.sin_port = htons(server_port);
+        serverlen = sizeof(serveraddr);
+        n = sendto(sockfd, pkt_data, pkt_len, 0,
+                   (const struct sockaddr *)&serveraddr, serverlen);
+        if (n < 0) {
+            EPRT("Sending report to %s failed\n",
+                 inet_ntoa(serveraddr.sin_addr));
+            ret = -1;
+            goto out;
+        }
+        VPRT("Sending report %i bytes to %s\n", n,
+             inet_ntoa(serveraddr.sin_addr));
     }
-    serveraddr.sin_port = htons(server_port);
-
-    serverlen = sizeof(serveraddr);
-    n = sendto(sockfd, pkt_data, pkt_len, 0,
-               (const struct sockaddr *)&serveraddr, serverlen);
-    if (n < 0) {
-        EPRT("Sending report to %s failed\n", inet_ntoa(serveraddr.sin_addr));
+    ret = 0;
+out:
+    if (sockfd >= 0) {
         close(sockfd);
-        return -1;
     }
-    DPRT("Sending report %i bytes to %s\n", n, inet_ntoa(serveraddr.sin_addr));
+    if (result != NULL) {
+        freeaddrinfo(result);
+    }
+    pthread_mutex_unlock(&send_packet_lock);
 
-    close(sockfd);
-
-    return 0;
+    return ret;
 }
 
 int send_latency_report(char *server_name, __u32 server_addr, int server_port,

@@ -14,6 +14,13 @@
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <linux/perf_event.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <arpa/inet.h>
+
+#define max(a, b) ((a) > (b) ? (a) : (b))
+#define INET_NTOP_BUF_LEN max(INET_ADDRSTRLEN, INET6_ADDRSTRLEN)
 
 #define MAX_REPORT_PAYLOAD_LEN 2048
 #define IP_HDR_OFF 14
@@ -141,6 +148,101 @@ int perf_event_poller_multi(int *fds, struct perf_event_mmap_page **headers,
     free(pfds);
 
     return ret == LIBBPF_PERF_EVENT_ERROR ? ret : 0;
+}
+
+void debug_print_getaddrinfo_results(struct addrinfo *result)
+{
+    struct addrinfo *rp;
+    int n, j;
+    char *family_desc;
+    char *socktype_desc;
+    char *protocol_desc;
+    char address_buf[INET_NTOP_BUF_LEN];
+    void *ptr;
+
+    n = 0;
+    for (rp = result; rp != NULL; rp = rp->ai_next) {
+        n++;
+    }
+    printf("getaddrinfo returned list of %d results\n", n);
+    n = 0;
+    for (rp = result; rp != NULL; rp = rp->ai_next) {
+        printf("index=%d:\n", n);
+        /* See /usr/include/x86_64-linux-gnu/bits/socket.h for a more
+         * complete list.  Only the most common values I have seen in
+         * practice are included below. */
+        switch (rp->ai_family) {
+        case AF_UNSPEC:
+            family_desc = "AF_UNSPEC";
+            break;
+        case AF_INET:
+            family_desc = "AF_INET - IPv4";
+            break;
+        case AF_INET6:
+            family_desc = "AF_INET6 - IPv6";
+            break;
+        default:
+            family_desc = "(unknown)";
+            break;
+        }
+        switch (rp->ai_socktype) {
+        case SOCK_STREAM:
+            socktype_desc = "SOCK_STREAM";
+            break;
+        case SOCK_DGRAM:
+            socktype_desc = "SOCK_DGRAM";
+            break;
+        default:
+            socktype_desc = "(unknown)";
+            break;
+        }
+        switch (rp->ai_protocol) {
+        case IPPROTO_TCP:
+            protocol_desc = "IPPROTO_TCP";
+            break;
+        case IPPROTO_UDP:
+            protocol_desc = "IPPROTO_UDP";
+            break;
+        default:
+            protocol_desc = "(unknown)";
+            break;
+        }
+        printf("  family=%u (%s)\n", rp->ai_family, family_desc);
+        printf("  socktype=%u (%s)\n", rp->ai_socktype, socktype_desc);
+        printf("  protocol=%u (%s)\n", rp->ai_protocol, protocol_desc);
+        printf("  flags=%u\n", rp->ai_flags);
+        printf("  canonname=%s\n", rp->ai_canonname);
+        printf("  rp->ai_addrlen=%d\n", rp->ai_addrlen);
+        printf("  rp->ai_addr:");
+        for (j = 0; j < rp->ai_addrlen; j++) {
+            if ((j % 2) == 0) {
+                printf(" ");
+            }
+            printf("%02x", ((unsigned char *)rp->ai_addr)[j]);
+        }
+        printf("\n");
+        switch (rp->ai_family) {
+        case AF_INET:
+            ptr = &((struct sockaddr_in *)rp->ai_addr)->sin_addr;
+            inet_ntop(rp->ai_family, ptr, address_buf, sizeof(address_buf));
+            printf("  IPv4 address: %s\n", address_buf);
+            printf("  byte offset within ai_addr data: %lu\n",
+                   ptr - ((void *)rp->ai_addr));
+            break;
+        case AF_INET6:
+            ptr = &((struct sockaddr_in6 *)rp->ai_addr)->sin6_addr;
+            inet_ntop(rp->ai_family, ptr, address_buf, sizeof(address_buf));
+            printf("  IPv6 address: %s\n", address_buf);
+            printf("  byte offset within ai_addr data: %lu\n",
+                   ptr - ((void *)rp->ai_addr));
+            break;
+        default:
+            printf("  no support for converting family %u to ASCII string\n",
+                   rp->ai_family);
+            break;
+        }
+        n++;
+    }
 }
 
 #endif /* __UUTILS__ */

@@ -69,14 +69,106 @@ int bpf_map_get_next_key_and_delete(int fd, const void *key, void *next_key,
     return ret;
 }
 
+/* domain_name_or_ip_addr_string_to_binary_ip_address()
+ *
+ * Given a C string containing one of these formats (and perhaps
+ * others supported by the getaddrinfo(3) library function):
+ *
+ *   dotted decimal IPv4 address, e.g. "10.1.2.3"
+ *   IPv6 address in RFC standard foramt, e.g. "2002::abcd"
+ *   A domain name, e.g. "www.google.com"
+ *
+ * Look up the IPv4 and/or IPv6 addresses in binary format that
+ * correspond to this string using getaddrinfo(3).  There can be
+ * multiple addresses found for a domain name.
+ *
+ * If any of the addresses found are IPv4 addresses, pick the first
+ * one and return it as a network-byte-order binary 4-byte IPv4
+ * address in the buffer pointed at by parameter nbo_ip_address.  Also
+ * assign the value AF_INET to *family, and return 0.  The choice of
+ * first one in the list returned by getaddrinfo(3) is fairly
+ * arbitrary, but should be good enough for where this function is
+ * used.
+ *
+ * If none of the addresses found are IPv4 addresses, pick the first
+ * one that has an IPv6 address and return it as a network-byte-order
+ * binary 16-byte IPv6 address in the buffer pointed at by
+ * nbo_ip_address.  Also assign the value AF_INET6 to *family, and
+ * return 0.
+ *
+ * If any errors occur during this process, or neither any IPv4 nor
+ * any IPv6 addresses are found, return -1. */
+
+int domain_name_or_ip_addr_string_to_binary_ip_address(char *name_or_addr_str,
+                                                       int udp_dest_port,
+                                                       void *nbo_ip_address,
+                                                       int *family)
+{
+    int ret;
+    char udp_dest_port_str[64];
+    struct addrinfo hints;
+    struct addrinfo *result, *rp, *first_ipv4_result, *first_ipv6_result;
+    void *ptr;
+
+    memset(&hints, 0, sizeof(struct addrinfo));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_flags = 0;
+    hints.ai_protocol = IPPROTO_UDP;
+
+    snprintf(udp_dest_port_str, sizeof(udp_dest_port_str), "%d", udp_dest_port);
+    ret = getaddrinfo(name_or_addr_str, udp_dest_port_str, &hints, &result);
+    if (ret != 0) {
+        EPRT("getaddrinfo: %s\n", gai_strerror(ret));
+        ret = -1;
+        goto out;
+    }
+    /* debug_print_getaddrinfo_results(result); */
+    first_ipv4_result = NULL;
+    first_ipv6_result = NULL;
+    for (rp = result; rp != NULL; rp = rp->ai_next) {
+        if (rp->ai_family == AF_INET) {
+            first_ipv4_result = rp;
+            ptr = &((struct sockaddr_in *)rp->ai_addr)->sin_addr;
+            /* We prefer IPv4 addresses if one exists, so stop
+             * scanning through the list if we find any IPv4
+             * address. */
+            break;
+        } else if (rp->ai_family == AF_INET6) {
+            if (first_ipv6_result == NULL) {
+                first_ipv6_result = rp;
+                ptr = &((struct sockaddr_in6 *)rp->ai_addr)->sin6_addr;
+            }
+        }
+    }
+    if (first_ipv4_result != NULL) {
+        *family = AF_INET;
+        memcpy(nbo_ip_address, ptr, 4);
+        ret = 0;
+    } else if (first_ipv6_result != NULL) {
+        *family = AF_INET6;
+        memcpy(nbo_ip_address, ptr, 16);
+        ret = 0;
+    } else {
+        ret = -1;
+    }
+
+out:
+    if (result != NULL) {
+        freeaddrinfo(result);
+    }
+    return ret;
+}
+
 int load_filter(int filter_map_fd, FILE *fp)
 {
-    struct hostent *server;
     char buffer[MAX_NAME + 2]; // one for new line, one for null termination
     int count = 0, ret;
     size_t line_len = 0;
     bool skipping = false;
     __u16 dummy_val = ELM_UPDATED, val;
+    int family;
+    char nbo_ip_address[16]; // enough to hold binary IPv4 or IPv6 address
     struct in_addr ip_addr = {0};
 
     while (NULL != fgets(buffer, sizeof(buffer), fp) &&
@@ -102,29 +194,34 @@ int load_filter(int filter_map_fd, FILE *fp)
             buffer[line_len - 1] = '\0';
         }
 
-        server = gethostbyname(buffer);
-        if (server == NULL) {
+        /* getaddrinfo(3) needs a port number.  For dotted decimal
+         * IPv4 addresses in the filter file, I believe the numeric
+         * value of this port number should never affect the behavior.
+         * It might affect the behavior for DNS domain names in the
+         * filter file, depending upon how DNS servers are
+         * configured. */
+        ret = domain_name_or_ip_addr_string_to_binary_ip_address(
+            buffer, 0, nbo_ip_address, &family);
+        if (ret == -1) {
             WPRT("  Ignore unknown filter target '%s'\n", buffer);
             continue;
         }
-
-        if (server->h_length != 4) {
+        if (family != AF_INET) {
             /* Only IPv4 addresses are currently supported. */
             WPRT("  Ignore unknown filter target '%s'\n", buffer);
             continue;
         }
-
-        memcpy((char *)&ip_addr.s_addr, (char *)server->h_addr,
-               server->h_length);
+        memcpy((char *)&ip_addr.s_addr, nbo_ip_address, 4);
+        inet_ntop(AF_INET, nbo_ip_address, buffer, sizeof(buffer));
         ret = bpf_map_update_elem(filter_map_fd, &ip_addr.s_addr, &dummy_val,
                                   BPF_ANY);
         if (ret < 0) {
             WPRT("  Failed to insert filter target '%s' in %s map. err code: "
                  "%i\n",
-                 inet_ntoa(ip_addr), SOURCE_MAP_FILTER, ret);
+                 buffer, SOURCE_MAP_FILTER, ret);
             continue;
         }
-        VPRT("  Inserted filter target '%s' into %s map\n", inet_ntoa(ip_addr),
+        VPRT("  Inserted filter target '%s' into %s map\n", buffer,
              SOURCE_MAP_FILTER);
         count++;
     }
@@ -137,10 +234,12 @@ int load_filter(int filter_map_fd, FILE *fp)
         ret = bpf_map_lookup_elem(filter_map_fd, &next_key, &val);
         if (ret < 0) {
             // shouldn't happen
-            EPRT("  No value for %s\n", inet_ntoa(ip_addr));
+            inet_ntop(AF_INET, &next_key, buffer, sizeof(buffer));
+            EPRT("  No value for %s\n", buffer);
         } else if (val != ELM_UPDATED) {
             del = true;
-            VPRT("  Removed existing filter target %s\n", inet_ntoa(ip_addr));
+            inet_ntop(AF_INET, &next_key, buffer, sizeof(buffer));
+            VPRT("  Removed existing filter target %s\n", buffer);
         } else {
             del = false;
             val = ELM_RUN;

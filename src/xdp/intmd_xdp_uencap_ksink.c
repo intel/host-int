@@ -17,7 +17,7 @@
 #include "rewrite_helpers.h"
 
 #define PROG_NAME "intmd_xdp_uencap_ksink"
-
+#undef SEQNUM_DEBUG
 struct temp_space_data_t {
     struct ethhdr eth_cpy;
     struct iphdr iph_cpy;
@@ -142,14 +142,15 @@ int sink_func(struct xdp_md *ctx)
     }
 
     if ((bpf_ntohs(iph->frag_off) & IPV4_FRAG_OFFSET_MASK) != 0) {
+#ifdef EXTRA_DEBUG
         bpf_printk(PROG_NAME " Not a first IPv4 fragment packet");
+#endif
         goto out;
     }
 
     if (ip_type != IPPROTO_UDP) {
         /* No bpf_printk here, since receiving packets with no INT
          * header is perfectly normal in many networks. */
-#define SEQNUM_DEBUG
 #ifdef SEQNUM_DEBUG
         bpf_printk(PROG_NAME " proto %u ipv4.id %u len %u\n", iph->protocol,
                    bpf_ntohs(iph->id), bpf_ntohs(iph->tot_len));

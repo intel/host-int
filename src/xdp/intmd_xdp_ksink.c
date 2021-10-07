@@ -143,7 +143,9 @@ int sink_func(struct xdp_md *ctx)
     }
 
     if ((bpf_ntohs(iph->frag_off) & IPV4_FRAG_OFFSET_MASK) != 0) {
+#ifdef EXTRA_DEBUG
         bpf_printk(PROG_NAME " Not a first IPv4 fragment packet");
+#endif
         goto out;
     }
 
