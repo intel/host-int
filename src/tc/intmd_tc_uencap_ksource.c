@@ -28,6 +28,7 @@
 #include "rewrite_helpers.h"
 #include "intmd_headers.h"
 #include "kutils.h"
+#include "kutilselfmap.h"
 
 #define PROG_NAME "intmd_tc_uencap_ksource"
 
@@ -60,6 +61,14 @@ struct bpf_elf_map SEC("maps") src_dest_ipv4_filter_map = {
     .size_value = sizeof(__u16),
     .pinning = PIN_GLOBAL_NS,
     .max_elem = DEST_FILTER_MAP_MAX_ENTRIES,
+};
+
+struct bpf_elf_map SEC("maps") src_stats_map = {
+    .type = BPF_MAP_TYPE_ARRAY,
+    .size_key = sizeof(__u32),
+    .size_value = sizeof(struct packet_byte_counter),
+    .pinning = PIN_GLOBAL_NS,
+    .max_elem = NUM_PACKET_BYTE_COUNTERS,
 };
 
 SEC("source_egress")
@@ -99,6 +108,15 @@ int source_egress_func(struct __sk_buff *skb)
                data_end - data);
 #endif
 
+    cfg_key = CONFIG_MAP_KEY_STATS_BASE_ADDRESS;
+    __u64 *stats_base_addr_ptr = bpf_map_lookup_elem(&src_config_map, &cfg_key);
+    __u32 stats_base_addr = 0;
+    if (stats_base_addr_ptr != NULL) {
+        stats_base_addr = (__u32)*stats_base_addr_ptr;
+    }
+    __u32 stats_offset = STATS_OTHER;
+    __u16 pkt_len_for_stats = data_end - data;
+
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end) {
         bpf_printk(PROG_NAME " processed packet that did not"
@@ -116,7 +134,8 @@ int source_egress_func(struct __sk_buff *skb)
     if (eth->h_proto != bpf_htons(ETH_P_IP)) {
         // No bpf_printk here -- this can be a frequent path, e.g. for
         // IPv6 packets.
-        return rc;
+        stats_offset = STATS_NOT_IPV4;
+        goto out;
     }
 
     /* Get IP header */
@@ -130,6 +149,7 @@ int source_egress_func(struct __sk_buff *skb)
                    bpf_ntohs(eth->h_proto), data_end - data);
         return rc;
     }
+    pkt_len_for_stats = bpf_ntohs(iph->tot_len);
 
     /* Determine whether receiving IPv4 address has been configured as
      * being prepared to receive packets with INT headers.  Note that
@@ -150,7 +170,8 @@ int source_egress_func(struct __sk_buff *skb)
                    " - forwarding packet with no modifications made\n",
                    bpf_ntohl(iph->daddr));
 #endif
-        return rc;
+        stats_offset = STATS_IPV4_NO_INT_HEADER;
+        goto out;
     }
 
     if ((int)oldlen > (DEFAULT_MTU - total_int_len_with_int_udp)) {
@@ -165,7 +186,15 @@ int source_egress_func(struct __sk_buff *skb)
                    " - forwarding packet with no modifications made\n",
                    (int)oldlen);
 #endif
-        return rc;
+        if (iph->protocol == IPPROTO_TCP) {
+            stats_offset = STATS_IPV4_TCP_TOO_LONG_TO_ADD_INT_HEADER;
+        } else if (iph->protocol == IPPROTO_UDP) {
+            stats_offset = STATS_IPV4_UDP_TOO_LONG_TO_ADD_INT_HEADER;
+        } else {
+            stats_offset =
+                STATS_IPV4_NEITHER_TCP_NOR_UDP_TOO_LONG_TO_ADD_INT_HEADER;
+        }
+        goto out;
 #endif // TRY_ADDING_INT_TO_TCP_SUPERPACKETS
     }
 
@@ -173,15 +202,22 @@ int source_egress_func(struct __sk_buff *skb)
 #ifdef EXTRA_DEBUG
         bpf_printk(PROG_NAME " Not a first IPv4 fragment packet");
 #endif
-        return rc;
+        if (iph->protocol == IPPROTO_TCP) {
+            stats_offset = STATS_IPV4_TCP_NON_FIRST_FRAGMENT;
+        } else if (iph->protocol == IPPROTO_UDP) {
+            stats_offset = STATS_IPV4_UDP_NON_FIRST_FRAGMENT;
+        } else {
+            stats_offset = STATS_IPV4_NEITHER_TCP_NOR_UDP_NON_FIRST_FRAGMENT;
+        }
+        goto out;
     }
 
-#ifdef EXTRA_DEBUG
-    ret = test_loading_data_after_data_end(skb, iph, dbg_ts);
-    if (ret < 0) {
-        return rc;
-    }
-#endif
+    //#ifdef EXTRA_DEBUG
+    //    ret = test_loading_data_after_data_end(skb, iph, dbg_ts);
+    //    if (ret < 0) {
+    //        return rc;
+    //    }
+    //#endif
 
     struct flow_key key;
     key.saddr = iph->saddr;
@@ -228,7 +264,8 @@ int source_egress_func(struct __sk_buff *skb)
     } else {
         // No bpf_printk here, since this could be a commonly taken
         // code path, for any packets that are neither TCP nor UDP.
-        return rc;
+        stats_offset = STATS_IPV4_NEITHER_TCP_NOR_UDP;
+        goto out;
     }
 
 #ifdef FLOW_DEBUG
@@ -254,7 +291,8 @@ int source_egress_func(struct __sk_buff *skb)
             bpf_printk(PROG_NAME " failed (%d) adding new entry key=%s\n", ret,
                        buf);
 #endif
-            return rc;
+            stats_offset = STATS_FLOW_STATS_MAP_FAILED_TO_ADD_ENTRY;
+            goto out;
         }
 #ifdef FLOW_DEBUG
         bpf_printk(PROG_NAME " new entry key=%s\n", buf);
@@ -292,7 +330,7 @@ int source_egress_func(struct __sk_buff *skb)
 
     /* Insert UDP header */
     cfg_key = CONFIG_MAP_KEY_INT_UDP_ENCAP_DEST_PORT;
-    __u32 *cfg_val_ptr;
+    __u64 *cfg_val_ptr;
     __u16 udp_dest_port;
     cfg_val_ptr = bpf_map_lookup_elem(&src_config_map, &cfg_key);
     if (cfg_val_ptr != NULL) {
@@ -328,9 +366,9 @@ int source_egress_func(struct __sk_buff *skb)
 
     cfg_key = CONFIG_MAP_KEY_NODE_ID;
     cfg_val_ptr = bpf_map_lookup_elem(&src_config_map, &cfg_key);
-    int id = DEFAULT_SOURCE_NODE_ID;
+    __be32 id = DEFAULT_SOURCE_NODE_ID;
     if (cfg_val_ptr != NULL) {
-        id = *cfg_val_ptr;
+        id = (__be32)*cfg_val_ptr;
     }
 
     struct int_metadata_entry mdentry = {.node_id = bpf_htonl(id),
@@ -448,7 +486,15 @@ int source_egress_func(struct __sk_buff *skb)
         return rc;
     }
     udph->len = bpf_htons(iplen - sizeof(struct iphdr));
+    if (key.proto == IPPROTO_TCP) {
+        stats_offset = STATS_IPV4_TCP_INT_HEADER_ADDED;
+    } else {
+        stats_offset = STATS_IPV4_UDP_INT_HEADER_ADDED;
+    }
 
+out:
+    update_stats_elf(stats_base_addr + stats_offset, &src_stats_map,
+                     pkt_len_for_stats);
     return rc;
 }
 

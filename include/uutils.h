@@ -226,15 +226,19 @@ void debug_print_getaddrinfo_results(struct addrinfo *result)
             ptr = &((struct sockaddr_in *)rp->ai_addr)->sin_addr;
             inet_ntop(rp->ai_family, ptr, address_buf, sizeof(address_buf));
             printf("  IPv4 address: %s\n", address_buf);
+            /*
             printf("  byte offset within ai_addr data: %lu\n",
                    ptr - ((void *)rp->ai_addr));
+            */
             break;
         case AF_INET6:
             ptr = &((struct sockaddr_in6 *)rp->ai_addr)->sin6_addr;
             inet_ntop(rp->ai_family, ptr, address_buf, sizeof(address_buf));
             printf("  IPv6 address: %s\n", address_buf);
+            /*
             printf("  byte offset within ai_addr data: %lu\n",
                    ptr - ((void *)rp->ai_addr));
+            */
             break;
         default:
             printf("  no support for converting family %u to ASCII string\n",

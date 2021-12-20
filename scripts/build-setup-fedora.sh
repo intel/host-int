@@ -39,6 +39,9 @@ fi
 # Fedora systems, for compiling EBPF programs:
 #
 # https://github.com/xdp-project/xdp-tutorial/blob/master/setup_dependencies.org
+#
+# elfutils-libelf-devel package is needed to build libbpf library from
+# source code, as the install-libbpf.sh script does.
 
 set -x
-sudo dnf install -y make clang llvm gcc iproute-devel
+sudo dnf install -y make clang llvm gcc iproute-devel elfutils-libelf-devel

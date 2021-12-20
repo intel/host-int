@@ -4,11 +4,11 @@
 XDP_TARGETS += intmd_xdp_ksource
 XDP_TARGETS += intmd_xdp_ksink
 XDP_TARGETS += intmd_xdp_uencap_ksink
-#XDP_TARGETS += intmd_xdp_ksink
+XDP_TARGETS += no_op_bpf
 USER_TARGETS += xdp_loader
 USER_LIBS=-lpthread
 
 COMMON_DIR = ../common/
 
 include $(COMMON_DIR)/common.mk
-COMMON_OBJS := $(COMMON_DIR)/common_params.o $(COMMON_DIR)/common_user_bpf_xdp.o
+COMMON_OBJS := $(COMMON_DIR)/common_params.o $(COMMON_DIR)/common_user_bpf_xdp.o $(COMMON_DIR)/common_report.o

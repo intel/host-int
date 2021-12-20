@@ -30,9 +30,9 @@ What is Host-INT for packet-telemetry?
   [Tofino](https://www.intel.com/content/www/us/en/products/network-io/programmable-ethernet-switch.html)
   programmable Ethernet switches.
 
-This is an Alpha, pre-production project from Intel.  See the
-[`LICENSE`](LICENSE) file for information about the license under
-which this code is released.
+This is a production release from Intel.  See the [`LICENSE`](LICENSE)
+file for information about the license under which this code is
+released.
 
 
 # Documentation
@@ -201,6 +201,14 @@ headers before the packets are processed by the the Linux kernel
 networking code, and for some packets will cause INT report packets to
 be generated.
 
+Note that INT report packets are sent without any encryption.  They
+contain all of the "5-tuple" fields of the packet/flow that caused the
+report to be generated, i.e. the source and destination IP address,
+the IP protocol, and the TCP or UDP source and destination port, but
+they do not contain any of the payload of the original packets.  If
+you wish report packets to be encrypted, you should consider using
+IPsec or SSH tunneling.
+
 
 ## Launch `hostintd` service
 
@@ -219,11 +227,25 @@ sudo systemctl status hostintd -l
 ```
 
 
-## Stop hostintd service
+## Stop `hostintd` service
 
 ```bash
 sudo systemctl stop hostintd
 ```
+
+
+## Enabling log rotation
+
+See [these instructions](docs/log_rotation.md) for instructions on
+configuring log rotation.  This is optional, but can help limit the
+storage consumed by Host-INT log files.
+
+
+## Finding core dump files
+
+See [these instructions](docs/core-dump-files.md) for notes on how to
+retrieve core dump files that may be created if the `hostintd` process
+crashes.
 
 
 # Enabling hosts to send packets with INT headers
@@ -298,7 +320,7 @@ application will see INT headers added to the data.
     ```
     DEV=eth1
     NODEID=2
-    OPT=-v 0x04 -m 0x04 -B 5000,10000,20000,40000,60000,120000 -E int_05_over_tcp_udp --filename /usr/lib/hostint/intmd_xdp_ksink.o -o /var/log/hostintd_report.log
+    OPT=-v 0x01 -m 0x01 -B 5000,10000,20000,40000,60000,120000 -E int_05_over_tcp_udp --filename /usr/lib/hostint/intmd_xdp_ksink.o -o /var/log/hostintd_report.log
     ```
     Use the same `/etc/hostintd.cfg` contents on host R as on host S,
     except change the value of `DEV` to `en0`, and the value of
@@ -345,6 +367,9 @@ application will see INT headers added to the data.
   future, perhaps one based on the
   [Huygens](https://www.usenix.org/conference/nsdi18/presentation/geng)
   clock synchronization algorithm.
+
+See [this document](docs/known-issues.md) for a list of known issues
+in the Host-INT implementation.
 
 
 ## Limitations specific to UDP packets
@@ -414,9 +439,8 @@ EBPF program will not add an INT header to those packets.  Thus none
 of the multiple packets that the superpacket is broken up into will
 have INT headers, either.
 
-As of version 0.1.0-alpha, this MTU is hard-coded to be 1500 bytes in
-the EBPF programs.  We plan to make this configurable in a future
-release.
+As of version 1.0.0, this MTU is hard-coded to be 1500 bytes in the
+EBPF programs.  We plan to make this configurable in a future release.
 
 This reduces the usefulness of Host-INT somewhat, since it appears
 that such TCP superpackets occur fairly often when the sending TCP
@@ -467,12 +491,11 @@ fragments, i.e. those with the IPv4 Fragment Offset field not equal to
 0, never contain a complete layer 4 header, and usually contain no
 part of the layer 4 header.
 
-As of version 0.1.0-alpha, Host-INT source and sink EBPF programs
-check whether IPv4 packets are non-first fragments, and if so, pass
-them through unmodified, i.e. the source host will not add INT headers
-to such packets.  The sink EBPF programs never attempt to parse a
-layer 4 header in non-first fragments (because there is none to
-parse).
+As of version 1.0.0, Host-INT source and sink EBPF programs check
+whether IPv4 packets are non-first fragments, and if so, pass them
+through unmodified, i.e. the source host will not add INT headers to
+such packets.  The sink EBPF programs never attempt to parse a layer 4
+header in non-first fragments (because there is none to parse).
 
 Note: If there is ever a scenario where:
 

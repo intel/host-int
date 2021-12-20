@@ -34,17 +34,23 @@
 #include "uutils.h"
 
 static pthread_mutex_t seq_num_lock;
+static pthread_mutex_t report_file_lock;
+static pthread_mutex_t sink_config_map_lock;
+static pthread_mutex_t sink_global_config_values_lock;
 
 static int done;
+
 static void sig_handler(int signo)
 {
-    DPRT("Caught signal. Stop program...\n");
+    VPRT("Caught signal %d. Stopping hostintd ...\n", signo);
     done = 1;
 }
+
 static int sink_config_map_fd = -1;
 static char collector_name[512];
 static int collector_port = -1;
-static int sender_collector_port = -1;
+static __u16 sender_collector_port;
+static int test_sender_collector_port = false;
 static FILE *report_file;
 static int report_with_switch_id = false;
 __u32 sink_node_id;
@@ -124,14 +130,113 @@ void cleanup()
     }
 }
 
+int init_report_file_lock()
+{
+    return pthread_mutex_init(&report_file_lock, NULL);
+}
+
+int init_sink_global_config_values_lock()
+{
+    return pthread_mutex_init(&sink_global_config_values_lock, NULL);
+}
+
+int init_sink_config_map_lock()
+{
+    return pthread_mutex_init(&sink_config_map_lock, NULL);
+}
+
+__u64 get_sink_config_map(__u16 key)
+{
+    int ret;
+    __u64 val;
+
+    ret = pthread_mutex_lock(&sink_config_map_lock);
+    if (ret != 0) {
+        EPRT("Failed to take mutex lock on sink_config_map. "
+             "err code: %i\n",
+             ret);
+        exit(1);
+    }
+    ret = bpf_map_lookup_elem(sink_config_map_fd, &key, &val);
+    if (ret < 0) {
+        EPRT("Failed to get sink_config_map from %s\n", SINK_MAP_CONFIG);
+    }
+    ret = pthread_mutex_unlock(&sink_config_map_lock);
+    if (ret != 0) {
+        EPRT("Failed to unlock mutex lock on sink_config_map. "
+             "err code: %i\n",
+             ret);
+        exit(1);
+    }
+    return val;
+}
+
+uint64_t get_sink_idle_flow_timeout(void)
+{
+    int val;
+    uint64_t ret;
+
+    val = pthread_mutex_lock(&sink_global_config_values_lock);
+    if (val != 0) {
+        EPRT("Failed to take mutex lock on sink idle flow timeout err "
+             "code: %i\n",
+             val);
+        exit(1);
+    }
+    ret = sink_idle_flow_timeout_ns;
+    val = pthread_mutex_unlock(&sink_global_config_values_lock);
+    if (val != 0) {
+        EPRT("Failed to unlock mutex lock on sink idle flow timeout. err "
+             "code: %i\n",
+             val);
+        exit(1);
+    }
+    return ret;
+}
+
+void get_sink_global_config_values(uint64_t *idle_flow_timeout,
+                                   uint64_t *pkt_loss_timeout)
+{
+    int val;
+
+    val = pthread_mutex_lock(&sink_global_config_values_lock);
+    if (val != 0) {
+        EPRT("Failed to take mutex lock on sink_global_config_values. err "
+             "code: %i\n",
+             val);
+        exit(1);
+    }
+    *idle_flow_timeout = sink_idle_flow_timeout_ns;
+    *pkt_loss_timeout = sink_pkt_loss_timeout_ns;
+    val = pthread_mutex_unlock(&sink_global_config_values_lock);
+    if (val != 0) {
+        EPRT("Failed to unlock mutex lock on sink_global_config_values. err "
+             "code: %i\n",
+             val);
+        exit(1);
+    }
+}
+
 int get_next_report_seq_num(void)
 {
     static int report_seq_num = 1;
-    int ret;
-    pthread_mutex_lock(&seq_num_lock);
+    int ret, val;
+    val = pthread_mutex_lock(&seq_num_lock);
+    if (val != 0) {
+        EPRT("Failed to take mutex lock on sequence number. err "
+             "code: %i\n",
+             val);
+        exit(1);
+    }
     ret = report_seq_num;
     report_seq_num += 1;
-    pthread_mutex_unlock(&seq_num_lock);
+    val = pthread_mutex_unlock(&seq_num_lock);
+    if (val != 0) {
+        EPRT("Failed to unlock mutex lock on sequence number. err "
+             "code: %i\n",
+             val);
+        exit(1);
+    }
     return ret;
 }
 
@@ -182,6 +287,7 @@ void update_time_offset(size_t timer_id, void *params)
 {
     static int source_config_map_fd = -1;
     static uint64_t time_offset = 0;
+    int ret;
     uint64_t new_offset = get_time_offset();
     if (!new_offset) {
         return;
@@ -213,9 +319,23 @@ void update_time_offset(size_t timer_id, void *params)
         ret1 = update_time_offset_map(source_config_map_fd, new_offset,
                                       SOURCE_MAP_CONFIG);
     }
+    ret = pthread_mutex_lock(&sink_config_map_lock);
+    if (ret != 0) {
+        EPRT("Failed to take mutex lock on sink_config_map. "
+             "err code: %i\n",
+             ret);
+        exit(1);
+    }
     int ret2 =
         update_time_offset_map(sink_config_map_fd, new_offset, SINK_MAP_CONFIG);
 
+    ret = pthread_mutex_unlock(&sink_config_map_lock);
+    if (ret != 0) {
+        EPRT("Failed to unlock mutex lock on sink_config_map. "
+             "err code: %i\n",
+             ret);
+        exit(1);
+    }
     if (ret1 == 0 && ret2 == 0) {
         time_offset = new_offset;
     }
@@ -311,14 +431,11 @@ static int process_ebpf_perf_event_from_sink(void *data, int size)
     __u32 int_rpt_body_part3_len =
         (sizeof(struct int_metadata_entry) + sizeof(seq_num));
 
-    __u32 pkt_len = 0;
+    __u32 pkt_len = (int_rpt_body_part1_len + int_rpt_body_part2_len +
+                     int_rpt_body_part3_len);
     /* populate buffer */
     if (report_with_switch_id == 1) {
-        pkt_len = (int_rpt_body_part1_len + int_rpt_body_part2_len +
-                   int_rpt_body_part3_len + sizeof(sink_node_id));
-    } else {
-        pkt_len = (int_rpt_body_part1_len + int_rpt_body_part2_len +
-                   int_rpt_body_part3_len);
+        pkt_len = (pkt_len + sizeof(sink_node_id));
     }
     __u8 buffer[pkt_len];
     __u32 offset = 0;
@@ -349,14 +466,28 @@ static int process_ebpf_perf_event_from_sink(void *data, int size)
     }
 
     if (report_file) {
+        err = pthread_mutex_lock(&report_file_lock);
+        if (err != 0) {
+            EPRT("Failed to take mutex lock on report file. err "
+                 "code: %i\n",
+                 err);
+            exit(1);
+        }
         print_latency_report(report_file,
                              (struct int_metadata_entry *)&(
                                  e->pkt_data[int_rpt_body_part3_offset]),
                              (struct int_metadata_entry *)&intmdsink,
                              report_seq_num, &ts, &key);
+        err = pthread_mutex_unlock(&report_file_lock);
+        if (err != 0) {
+            EPRT("Failed to unlock mutex lock on report file. err "
+                 "code: %i\n",
+                 err);
+            exit(1);
+        }
     }
 
-    if (sender_collector_port > 0) {
+    if (test_sender_collector_port) {
         err = send_latency_report(NULL, saddr, sender_collector_port, pkt_len,
                                   buffer, report_seq_num, &ts);
         if (err) {
@@ -499,8 +630,8 @@ static int process_ebpf_perf_event_from_sink_without_encap(void *data, int size)
     iph2->protocol = tail_hdr->proto;
     key.proto = iph2->protocol;
 
-    __u8 dscp_val = DEFAULT_INT_DSCP_VAL;
-    __u8 dscp_mask = DEFAULT_INT_DSCP_MASK;
+    __u8 dscp_val = DEFAULT_INT_DSCP_VAL << 2;
+    __u8 dscp_mask = DEFAULT_INT_DSCP_MASK << 2;
     iph2->tos = (iph2->tos & ~dscp_mask) | (dscp_val & dscp_mask);
 
     offset += int_rpt_body_part1_len;
@@ -532,13 +663,27 @@ static int process_ebpf_perf_event_from_sink_without_encap(void *data, int size)
     }
 
     if (report_file) {
+        err = pthread_mutex_lock(&report_file_lock);
+        if (err != 0) {
+            EPRT("Failed to take mutex lock on report file. err "
+                 "code: %i\n",
+                 err);
+            exit(1);
+        }
         print_latency_report(report_file,
                              (struct int_metadata_entry *)&(
                                  e->pkt_data[int_rpt_body_part5_offset]),
                              (struct int_metadata_entry *)&intmdsink,
                              report_seq_num, &ts, &key);
+        err = pthread_mutex_unlock(&report_file_lock);
+        if (err != 0) {
+            EPRT("Failed to unlock mutex lock on report file. err "
+                 "code: %i\n",
+                 err);
+            exit(1);
+        }
     }
-    if (sender_collector_port > 0) {
+    if (test_sender_collector_port) {
         err = send_latency_report(NULL, saddr, sender_collector_port, pkt_len,
                                   buffer, report_seq_num, &ts);
         if (err) {
@@ -629,10 +774,24 @@ static int send_drop_summary_report(struct flow_key *key,
     }
 
     if (report_file) {
+        err = pthread_mutex_lock(&report_file_lock);
+        if (err != 0) {
+            EPRT("Failed to take mutex lock on report file. err "
+                 "code: %i\n",
+                 err);
+            exit(1);
+        }
         print_drop_report(report_file, &reportd, report_seq_num, ts, key);
+        err = pthread_mutex_unlock(&report_file_lock);
+        if (err != 0) {
+            EPRT("Failed to unlock mutex lock on report file. err "
+                 "code: %i\n",
+                 err);
+            exit(1);
+        }
     }
 
-    if (sender_collector_port > 0) {
+    if (test_sender_collector_port) {
         err = send_drop_report(NULL, iph.saddr, sender_collector_port, len, buf,
                                report_seq_num, ts);
         if (err) {
@@ -671,7 +830,9 @@ static int send_drop_summary_report(struct flow_key *key,
 
 void clear_source_idle_flows(size_t timer_id, void *params)
 {
-    uint64_t idle_flow_timeout_ns = sink_idle_flow_timeout_ns;
+    uint64_t idle_flow_timeout_ns;
+
+    idle_flow_timeout_ns = get_sink_idle_flow_timeout();
     static int source_flow_stats_map_fd = -1;
     // check map file
     if (source_flow_stats_map_fd < 0) {
@@ -743,8 +904,9 @@ void clear_source_idle_flows(size_t timer_id, void *params)
 
 void pkt_drop_stats_collect(size_t timer_id, void *params)
 {
-    uint64_t idle_flow_timeout_ns = sink_idle_flow_timeout_ns;
-    uint64_t pkt_loss_timeout_ns = sink_pkt_loss_timeout_ns;
+    uint64_t idle_flow_timeout_ns;
+    uint64_t pkt_loss_timeout_ns;
+    get_sink_global_config_values(&idle_flow_timeout_ns, &pkt_loss_timeout_ns);
     int flow_stats_map_fd = *((int *)params);
     struct flow_key key;
     struct flow_key *prev_key = NULL;
@@ -752,6 +914,7 @@ void pkt_drop_stats_collect(size_t timer_id, void *params)
 
     struct flow_key to_delete[FLOW_MAP_MAX_ENTRIES];
     int to_delete_size = 0;
+
     struct timespec curr_ts;
     int err = get_timestamp(&curr_ts);
     if (err < 0) {
@@ -881,37 +1044,60 @@ static void reload_handler()
 {
     VPRT("Reloading configurations\n");
     __u16 key = CONFIG_MAP_KEY_IDLE_TO;
-    __u32 val;
+    __u32 val = 0;
+    int ret;
 
-    int ret = bpf_map_lookup_elem(sink_config_map_fd, &key, &val);
-    if (ret < 0) {
-        EPRT("Failed to get idle flow timeout from %s\n", SINK_MAP_CONFIG);
-    } else {
-        if (val <= MAX_IDLE_FLOW_TIMEOUT_MS) {
-            sink_idle_flow_timeout_ns = (uint64_t)val * MILLI_TO_NANO;
-            VPRT("Updated sink idle flow timeout to %" PRIu64 " ns\n",
-                 sink_idle_flow_timeout_ns);
-        } else {
-            EPRT("Value %d from the map is larger than the maximum "
-                 "supported value of %d ms\n",
-                 val, MAX_IDLE_FLOW_TIMEOUT_MS);
+    val = get_sink_config_map(key);
+    if (val <= MAX_IDLE_FLOW_TIMEOUT_MS) {
+        ret = pthread_mutex_lock(&sink_global_config_values_lock);
+        if (ret != 0) {
+            EPRT("Failed to take mutex lock on sink_idle_flow_timeout_ns. "
+                 "err code: %i\n",
+                 ret);
+            exit(1);
         }
+
+        sink_idle_flow_timeout_ns = (uint64_t)val * MILLI_TO_NANO;
+        VPRT("Updated sink idle flow timeout to %" PRIu64 " ns\n",
+             sink_idle_flow_timeout_ns);
+
+        ret = pthread_mutex_unlock(&sink_global_config_values_lock);
+        if (ret != 0) {
+            EPRT("Failed to unlock mutex lock on sink_idle_flow_timeout_ns. "
+                 "err code: %i\n",
+                 ret);
+            exit(1);
+        }
+    } else {
+        EPRT("Value %d from the map is larger than the maximum "
+             "supported value of %d ms\n",
+             val, MAX_IDLE_FLOW_TIMEOUT_MS);
     }
 
     key = CONFIG_MAP_KEY_PKTLOSS_TO;
-    ret = bpf_map_lookup_elem(sink_config_map_fd, &key, &val);
-    if (ret < 0) {
-        EPRT("Failed to get packet loss timeout from %s\n", SINK_MAP_CONFIG);
-    } else {
-        if (val <= MAX_PKT_LOSS_TIMEOUT_MS) {
-            sink_pkt_loss_timeout_ns = (uint64_t)val * MILLI_TO_NANO;
-            VPRT("Updated sink packet loss timeout to %" PRIu64 " ns\n",
-                 sink_pkt_loss_timeout_ns);
-        } else {
-            EPRT("Value %d from the map is larger than the maximum "
-                 "supported value of %d ms\n",
-                 val, MAX_PKT_LOSS_TIMEOUT_MS);
+    val = get_sink_config_map(key);
+    if (val <= MAX_PKT_LOSS_TIMEOUT_MS) {
+        ret = pthread_mutex_lock(&sink_global_config_values_lock);
+        if (ret != 0) {
+            EPRT("Failed to take mutex lock on sink_pkt_loss_timeout. "
+                 "err code: %i\n",
+                 ret);
+            exit(1);
         }
+        sink_pkt_loss_timeout_ns = (uint64_t)val * MILLI_TO_NANO;
+        VPRT("Updated sink packet loss timeout to %" PRIu64 " ns\n",
+             sink_pkt_loss_timeout_ns);
+        ret = pthread_mutex_unlock(&sink_global_config_values_lock);
+        if (ret != 0) {
+            EPRT("Failed to unlock mutex lock on sink_pkt_loss_timeout. "
+                 "err code: %i\n",
+                 ret);
+            exit(1);
+        }
+    } else {
+        EPRT("Value %d from the map is larger than the maximum "
+             "supported value of %d ms\n",
+             val, MAX_PKT_LOSS_TIMEOUT_MS);
     }
 }
 
@@ -924,9 +1110,15 @@ int main(int argc, char **argv)
     int perf_map_fd;
     int flow_stats_map_fd;
     int latency_bucket_map_fd;
+    int sink_stats_map_fd;
     struct bpf_map_info info = {0};
-
     int ret, i, len;
+
+    if (init_printf_lock() != 0) {
+        fprintf(stderr, "Mutex init failed.\n");
+        return EXIT_FAIL;
+    }
+
     int numcpus = libbpf_num_possible_cpus();
     if (numcpus > MAX_CPUS) {
         // todo: need to revisit. If we suggest our user "update MAX_CPUS to
@@ -942,16 +1134,16 @@ int main(int argc, char **argv)
     struct config cfg = {
         .xdp_flags = XDP_FLAGS_SKB_MODE,
         .ifindex = -1,
-        .node_id = -1,
-        .dscp_val = -1,
-        .dscp_mask = -1,
+        .test_node_id = false,
+        .test_dscp_val = false,
+        .test_dscp_mask = false,
         .idle_flow_timeout_ms = DEFAULT_IDLE_FLOW_TIMEOUT_MS,
         .pkt_loss_timeout_ms = PKT_LOSS_TIMEOUT_MS,
         .server_hostname = "",
         .server_port = -1,
         .drop_packet = false,
         .sw_id_after_report_hdr = true,
-        .sender_collector_port = -1,
+        .test_sender_collector_port = false,
         .num_latency_entries = 0,
         .encap_type = -1,
     };
@@ -970,6 +1162,16 @@ int main(int argc, char **argv)
         return EXIT_FAIL;
     }
 
+    if (init_sink_global_config_values_lock() != 0) {
+        EPRT("Mutex init failed.\n");
+        return EXIT_FAIL;
+    }
+
+    if (init_sink_config_map_lock() != 0) {
+        EPRT("Mutex init failed.\n");
+        return EXIT_FAIL;
+    }
+
     /* Cmdline options can change these */
     parse_cmdline_args(argc, argv, long_options, &cfg, __doc__);
 
@@ -980,13 +1182,13 @@ int main(int argc, char **argv)
         return EXIT_FAIL_OPTION;
     }
 
-    if (cfg.dscp_val == -1 && cfg.dscp_mask != -1) {
+    if (!cfg.test_dscp_val && cfg.test_dscp_mask) {
         EPRT("dscp value is not specified\n");
         usage(argv[0], __doc__, long_options, (argc == 1));
         return EXIT_FAIL_OPTION;
     }
 
-    if (cfg.dscp_val != -1 && cfg.dscp_mask == -1) {
+    if (cfg.test_dscp_val && !cfg.test_dscp_mask) {
         EPRT("dscp mask is not specified\n");
         usage(argv[0], __doc__, long_options, (argc == 1));
         return EXIT_FAIL_OPTION;
@@ -1031,9 +1233,10 @@ int main(int argc, char **argv)
         }
     }
 
-    if (cfg.sender_collector_port > 0) {
+    if (cfg.test_sender_collector_port) {
         sender_collector_port = cfg.sender_collector_port;
-        VPRT("Will send report back to sender's UDP port %i\n",
+        test_sender_collector_port = cfg.test_sender_collector_port;
+        VPRT("Will send report back to sender's UDP port %u\n",
              cfg.sender_collector_port);
     }
 
@@ -1072,10 +1275,9 @@ int main(int argc, char **argv)
     }
 
     atexit(cleanup);
-    signal(SIGINT, sig_handler);
-    signal(SIGHUP, reload_handler);
-    signal(SIGTERM, sig_handler);
-    signal(SIGABRT, sig_handler);
+    set_sig_handler(SIGHUP, reload_handler);
+    set_sig_handler(SIGINT, sig_handler);
+    set_sig_handler(SIGTERM, sig_handler);
 
     if (cfg.filename[0]) {
         ret = deploy_ebpf(&cfg);
@@ -1111,6 +1313,13 @@ int main(int argc, char **argv)
     }
     VPRT("Opened %s with id=%i\n", SINK_MAP_LATENCY, info.id);
 
+    sink_stats_map_fd = open_bpf_map_file(cfg.pin_dir, SINK_MAP_STATS, &info);
+    if (sink_stats_map_fd < 0) {
+        EPRT("Failed to open %s from %s\n", SINK_MAP_STATS, cfg.pin_dir);
+        return EXIT_FAIL_BPF;
+    }
+    VPRT("Opened %s with id=%i\n", SINK_MAP_STATS, info.id);
+
     __u16 latency_bucket_key = LATENCY_MAP_KEY_LATENCY_BUCKET;
 
     ret = bpf_map_update_elem(latency_bucket_map_fd, &latency_bucket_key,
@@ -1128,11 +1337,13 @@ int main(int argc, char **argv)
     }
     VPRT("Opened %s with id=%i\n", SINK_MAP_CONFIG, info.id);
 
-    if (cfg.node_id != -1) {
+    __u64 val;
+    if (cfg.test_node_id) {
         // enum ConfigKey node_id_key = NODE_ID;
         __u16 node_id_key = CONFIG_MAP_KEY_NODE_ID;
-        ret = bpf_map_update_elem(sink_config_map_fd, &node_id_key,
-                                  &cfg.node_id, BPF_ANY);
+        val = (__u64)cfg.node_id;
+        ret = bpf_map_update_elem(sink_config_map_fd, &node_id_key, &val,
+                                  BPF_ANY);
         if (ret < 0) {
             EPRT("Failed to insert node_id (%i) in sink config map. err code: "
                  "%i\n",
@@ -1142,18 +1353,20 @@ int main(int argc, char **argv)
         VPRT("Set node_id (%i) in sink config map\n", cfg.node_id);
     }
 
-    if (cfg.dscp_val != -1 && cfg.dscp_mask != -1) {
+    if ((cfg.test_dscp_val) && (cfg.test_dscp_mask)) {
         __u16 dscp_val_key = CONFIG_MAP_KEY_DSCP_VAL;
-        ret = bpf_map_update_elem(sink_config_map_fd, &dscp_val_key,
-                                  &cfg.dscp_val, BPF_ANY);
+        val = (__u64)cfg.dscp_val << 2;
+        ret = bpf_map_update_elem(sink_config_map_fd, &dscp_val_key, &val,
+                                  BPF_ANY);
         if (ret < 0) {
             EPRT("Failed to insert dscp_val in sink config map. err code: %i\n",
                  ret);
             return EXIT_FAIL_BPF;
         }
         __u16 dscp_mask_key = CONFIG_MAP_KEY_DSCP_MASK;
-        ret = bpf_map_update_elem(sink_config_map_fd, &dscp_mask_key,
-                                  &cfg.dscp_mask, BPF_ANY);
+        val = (__u64)cfg.dscp_mask << 2;
+        ret = bpf_map_update_elem(sink_config_map_fd, &dscp_mask_key, &val,
+                                  BPF_ANY);
         if (ret < 0) {
             EPRT(
                 "Failed to insert dscp_mask in sink config map. err code: %i\n",
@@ -1166,8 +1379,8 @@ int main(int argc, char **argv)
     }
 
     __u16 idel_to_key = CONFIG_MAP_KEY_IDLE_TO;
-    ret = bpf_map_update_elem(sink_config_map_fd, &idel_to_key,
-                              &cfg.idle_flow_timeout_ms, BPF_ANY);
+    val = (__u64)cfg.idle_flow_timeout_ms;
+    ret = bpf_map_update_elem(sink_config_map_fd, &idel_to_key, &val, BPF_ANY);
     if (ret < 0) {
         EPRT("Failed to insert idle flow timeout in sink config map. err code: "
              "%i\n",
@@ -1178,8 +1391,8 @@ int main(int argc, char **argv)
          cfg.idle_flow_timeout_ms);
 
     __u16 pkt_loss_key = CONFIG_MAP_KEY_PKTLOSS_TO;
-    ret = bpf_map_update_elem(sink_config_map_fd, &pkt_loss_key,
-                              &cfg.pkt_loss_timeout_ms, BPF_ANY);
+    val = (__u64)cfg.pkt_loss_timeout_ms;
+    ret = bpf_map_update_elem(sink_config_map_fd, &pkt_loss_key, &val, BPF_ANY);
     if (ret < 0) {
         EPRT("Failed to insert packet loss timeout in sink config map. err "
              "code: "
@@ -1191,9 +1404,10 @@ int main(int argc, char **argv)
          cfg.pkt_loss_timeout_ms);
 
     __u16 drop_packet_key = CONFIG_MAP_KEY_DROP_PACKET;
+    val = (__u64)cfg.drop_packet;
     if (cfg.drop_packet == 1) {
-        ret = bpf_map_update_elem(sink_config_map_fd, &drop_packet_key,
-                                  &cfg.drop_packet, BPF_ANY);
+        ret = bpf_map_update_elem(sink_config_map_fd, &drop_packet_key, &val,
+                                  BPF_ANY);
         if (ret < 0) {
             EPRT("Failed to insert drop packet (%i) in sink config map. err "
                  "code: "
@@ -1239,7 +1453,13 @@ int main(int argc, char **argv)
     stop_timer(source_clean_timer);
     stop_timer(time_offset_update_timer);
     close_timers();
-    pthread_mutex_destroy(&seq_num_lock);
+    ret = pthread_mutex_destroy(&seq_num_lock);
+    if (ret != 0) {
+        EPRT("Failed to destroy sequence number mutex. err "
+             "code: %i\n",
+             ret);
+        exit(1);
+    }
 
     xdp_link_detach(cfg.ifindex, cfg.xdp_flags, 0);
 

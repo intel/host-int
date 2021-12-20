@@ -7,6 +7,11 @@ readonly DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly BASENAME="$(basename $0)"
 opt_dev=
 opt_quiet=0
+opt_show_statistics=0
+opt_show_filter_entries=0
+opt_show_config_map=0
+opt_show_latency_bucket=0
+opt_copy_node_id=0
 opt_prog_type=
 opt_unload=0
 opt_filename=
@@ -29,6 +34,11 @@ function usage() {
   1>&2 echo " -h, --help                 Show help"
   1>&2 echo " -V, --Version              Print version number"
   1>&2 echo " -q, --quiet                Quiet mode (no output)"
+  1>&2 echo " -H, --show-statistics      Show EBPF program statistics"
+  1>&2 echo " -G, --show-filter-entries  Show Filter entries"
+  1>&2 echo " -I, --show-config-map      Show Config map"
+  1>&2 echo " -J, --copy-node-id         Copy Node id"
+  1>&2 echo " -L, --show-latency-bucket  Show Latency Bucket"
   1>&2 echo " -n, --node-id              Node ID"
   1>&2 echo " -v, --dscp-val             DSCP Value"
   1>&2 echo " -m, --dscp-mask            DSCP Mask"
@@ -52,9 +62,22 @@ function verb_msg() {
   [ $opt_quiet != 1 ] && echo "$1"
 }
 
+function find_hostintcfg() {
+  # try hostintcfg under hostintctl folder first
+  # if doesn't exist, try system PATH
+  if type $DIR/hostintcfg >/dev/null 2>&1; then
+    HOSTINTCFG="$DIR/hostintcfg"
+  elif type hostintcfg >/dev/null 2>&1; then
+    HOSTINTCFG="hostintcfg"
+  else
+    err_msg "Couldn't find hostintcfg"
+    exit 1
+  fi
+}
+
 function parse_options() {
-  opts=$(getopt -o d:hVqT:n:v:m:t:l:U \
-                -l dev,help,Version,quiet,prog-type:,node-id:,dscp-val:,dscp-mask:,idle-flow-timeout-ms:,pkg-loss-timeout-ms:,unload,filename:,filter-filename: \
+  opts=$(getopt -o d:hVqHGLIJT:n:v:m:t:l:U \
+                -l dev:,help,Version,quiet,show-statistics,show-filter-entries,show-latency-bucket,show-config-map,copy-node-id,prog-type:,node-id:,dscp-val:,dscp-mask:,idle-flow-timeout-ms:,pkg-loss-timeout-ms:,unload,filename:,filter-filename: \
                 -n "$BASENAME" -- "$@")
   if [ $? != 0 ]; then
     1>&2 echo "Terminating..."
@@ -73,10 +96,30 @@ function parse_options() {
         usage
         exit 0;;
       -V | --Version)
-        hostintcfg -V
+        ${HOSTINTCFG} -V
         exit 0;;
       -q | --quiet)
         opt_quiet=1
+        opt_cfg="${opt_cfg}$1 "
+        shift;;
+      -H | --show-statistics)
+        opt_show_statistics=1
+        opt_cfg="${opt_cfg}$1 "
+        shift;;
+      -G | --show-filter-entries)
+        opt_show_filter_entries=1
+        opt_cfg="${opt_cfg}$1 "
+        shift;;
+      -L | --show-latency-bucket)
+        opt_show_latency_bucket=1
+        opt_cfg="${opt_cfg}$1 "
+        shift;;
+      -I | --show-config-map)
+        opt_show_config_map=1
+        opt_cfg="${opt_cfg}$1 "
+        shift;;
+      -J | --copy-node-id)
+        opt_copy_node_id=1
         opt_cfg="${opt_cfg}$1 "
         shift;;
       -T | --prog-type)
@@ -161,6 +204,7 @@ function load_source_ebpf() {
   if tc qdisc add dev "${dev}" clsact && tc filter add dev "${dev}" egress bpf da object-file "${file}" section source_egress $verbose; then
     verb_msg "Successfully load source EBPF '${file}' on ${dev}"
   fi
+  sudo ${HOSTINTCFG} --dev $dev --prog-type SINK --copy-node-id --quiet
 }
 
 function unload_source_ebpf() {
@@ -173,29 +217,28 @@ function unload_source_ebpf() {
 }
 
 function main() {
+  find_hostintcfg
   parse_options "$@"
 
   if [[ ${opt_unload} -eq 1 ]]; then
     unload_source_ebpf "${opt_dev}"
     exit 0
   elif [ -n "${opt_filename}" ]; then
-    load_source_ebpf "${opt_dev}" "${opt_filename}" || exit 1
+    sudo systemctl is-active --quiet hostintd
+    if [ $? -ne 0 ]; then
+      echo "Source can be loaded only if hostintd service is running."
+      echo "Start hostintd service first."
+      exit 1
+    else
+      load_source_ebpf "${opt_dev}" "${opt_filename}" || exit 1
+    fi
   fi
 
-  if [[ ${has_cfg} -eq 0 ]]; then
+  if [[ ${has_cfg} -eq 0 && ${opt_show_statistics} -eq 0 && ${opt_show_filter_entries} -eq 0 && ${opt_show_config_map} -eq 0 && ${opt_show_latency_bucket} -eq 0 && ${opt_copy_node_id} -eq 0 ]]; then
     exit 0
   fi
 
-  # try hostintcfg under hostintctl folder first
-  # if doesn't exist, try system PATH
-  if type $DIR/hostintcfg >/dev/null 2>&1; then
-    $DIR/hostintcfg ${opt_cfg} || exit 1
-  elif type hostintcfg >/dev/null 2>&1; then
-    hostintcfg ${opt_cfg} || exit 1
-  else
-    err_msg "Couldn't find hostintcfg"
-    exit 1
-  fi
+  ${HOSTINTCFG} ${opt_cfg} || exit 1
 
   check_cmd pkill
   pkill -SIGHUP hostintd || :

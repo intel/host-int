@@ -38,7 +38,7 @@ static FILE *report_file;
 static int done;
 static void sig_handler(int signo)
 {
-    DPRT("Caught signal. Stop program...\n");
+    VPRT("Caught signal %d. Stopping hostintcol ...\n", signo);
     done = 1;
 }
 
@@ -78,7 +78,7 @@ void cleanup()
     }
 }
 
-int launch_udp_receiver(char *ip_addr, int port)
+int launch_udp_receiver(char *ip_addr, __u16 port)
 {
     struct sockaddr_in server_addr = {0};
     int sockfd = -1;
@@ -250,10 +250,16 @@ void listen_data(int sockfd)
 int main(int argc, char **argv)
 {
     struct config cfg = {
-        .port = DEFAULT_HOSTINTCOL_PORT,
+        .test_port = false,
         .sw_id_after_report_hdr = true,
         .bind_addr = "",
     };
+
+    if (init_printf_lock() != 0) {
+        fprintf(stderr, "Mutex init failed.\n");
+        return EXIT_FAIL;
+    }
+
     snprintf(cfg.report_file, sizeof(cfg.report_file), "%s",
              DEFAULT_HOSTINTCOL_REPORT_FILE);
 
@@ -273,14 +279,21 @@ int main(int argc, char **argv)
         report_with_switch_id = 1;
     }
 
-    int sockfd = launch_udp_receiver(cfg.bind_addr, cfg.port);
+    __u16 col_port;
+    if (cfg.test_port) {
+        col_port = cfg.port;
+    } else {
+        col_port = DEFAULT_HOSTINTCOL_PORT;
+    }
+
+    int sockfd = launch_udp_receiver(cfg.bind_addr, col_port);
     if (sockfd < 0) {
         return sockfd;
     }
 
     atexit(cleanup);
-    signal(SIGINT, sig_handler);
-    signal(SIGTERM, sig_handler);
+    set_sig_handler(SIGINT, sig_handler);
+    set_sig_handler(SIGTERM, sig_handler);
 
     listen_data(sockfd);
 

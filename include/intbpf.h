@@ -36,8 +36,8 @@
 
 // Default DSCP value/mask to use if not provided by configuration
 // map.
-#define DEFAULT_INT_DSCP_VAL 0x04
-#define DEFAULT_INT_DSCP_MASK 0x04
+#define DEFAULT_INT_DSCP_VAL 0x01
+#define DEFAULT_INT_DSCP_MASK 0x01
 
 // Default UDP destination port value to use, if one is not provided
 // by the configuration map.
@@ -54,7 +54,8 @@
 // Default latency report period to use if not provided by
 // configuration map.
 #define DEFAULT_LATENCY_REPORT_PERIOD_NSEC (2 * MSECS_PER_SEC * MILLI_TO_NANO)
-
+#define MAX_LATENCY_BUCKET_VALUE (2 * MSECS_PER_SEC * MILLI_TO_NANO)
+#define CONFIG_MAP_KEY_MIN 1
 #define CONFIG_MAP_KEY_NODE_ID 1
 #define CONFIG_MAP_KEY_DSCP_VAL 2
 #define CONFIG_MAP_KEY_DSCP_MASK 3
@@ -66,6 +67,9 @@
 #define CONFIG_MAP_KEY_INT_UDP_ENCAP_DEST_PORT 9
 #define CONFIG_MAP_KEY_LATENCY_REPORT_PERIOD_NSEC 10
 #define CONFIG_MAP_KEY_DROP_PACKET 11
+#define CONFIG_MAP_KEY_STATS_BASE_ADDRESS 12
+#define CONFIG_MAP_KEY_MAX 12
+
 #define LATENCY_MAP_KEY_LATENCY_BUCKET 0
 #define U64_MAX_VALUE 0xFFFFFFFFFFFFFFFF
 
@@ -123,6 +127,29 @@ struct packet_metadata {
 struct latency_bucket_entries {
     __u64 entries[LATENCYBUCKET_MAP_MAX_ENTRIES];
 };
+
+#define NUM_PACKET_BYTE_COUNTERS 100
+
+struct packet_byte_counter {
+    __u64 pkt_count;
+    __u64 byte_count;
+};
+
+#define STATS_OTHER 0
+#define STATS_NOT_IPV4 1
+#define STATS_IPV4_NO_INT_HEADER 2
+#define STATS_IPV4_NEITHER_TCP_NOR_UDP 3
+#define STATS_IPV4_TCP_TOO_LONG_TO_ADD_INT_HEADER 4
+#define STATS_IPV4_UDP_TOO_LONG_TO_ADD_INT_HEADER 5
+#define STATS_IPV4_NEITHER_TCP_NOR_UDP_TOO_LONG_TO_ADD_INT_HEADER 6
+#define STATS_IPV4_TCP_NON_FIRST_FRAGMENT 7
+#define STATS_IPV4_UDP_NON_FIRST_FRAGMENT 8
+#define STATS_IPV4_NEITHER_TCP_NOR_UDP_NON_FIRST_FRAGMENT 9
+#define STATS_FLOW_STATS_MAP_FAILED_TO_ADD_ENTRY 10
+#define STATS_IPV4_TCP_INT_HEADER_ADDED 11
+#define STATS_IPV4_UDP_INT_HEADER_ADDED 12
+
+#define STATS_OFFSET_MAX STATS_IPV4_UDP_INT_HEADER_ADDED
 
 #define get_timestamp(pts) clock_gettime(CLOCK_REALTIME, pts)
 

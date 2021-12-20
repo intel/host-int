@@ -65,6 +65,13 @@ struct bpf_map_def SEC("maps") latency_bucket_map = {
     .max_entries = LATENCYBUCKET_MAP_MAX_ENTRIES,
 };
 
+struct bpf_map_def SEC("maps") sink_stats_map = {
+    .type = BPF_MAP_TYPE_ARRAY,
+    .key_size = sizeof(__u32),
+    .value_size = sizeof(struct packet_byte_counter),
+    .max_entries = NUM_PACKET_BYTE_COUNTERS,
+};
+
 SEC("xdp")
 int sink_func(struct xdp_md *ctx)
 {
@@ -104,6 +111,16 @@ int sink_func(struct xdp_md *ctx)
         bpf_printk(PROG_NAME " time_offset is NULL\n");
     }
 
+    cfg_key = CONFIG_MAP_KEY_STATS_BASE_ADDRESS;
+    __u64 *stats_base_addr_ptr =
+        bpf_map_lookup_elem(&sink_config_map, &cfg_key);
+    __u32 stats_base_addr = 0;
+    if (stats_base_addr_ptr != NULL) {
+        stats_base_addr = (__u32)*stats_base_addr_ptr;
+    }
+    __u32 stats_offset = STATS_OTHER;
+    __u16 pkt_len_for_stats = data_end - data;
+
     __u32 sink_ts_ns = bpf_htonl((__u32)curr_ts);
     __u16 ingress_port = (__u16)(ctx->ingress_ifindex);
 
@@ -135,9 +152,11 @@ int sink_func(struct xdp_md *ctx)
             action = XDP_DROP;
             goto out;
         }
+        pkt_len_for_stats = bpf_ntohs(iph->tot_len);
     } else {
         // No bpf_printk here, since receiving non-IPv4
         // packets is perfectly normal in many networks.
+        stats_offset = STATS_NOT_IPV4;
         goto out;
     }
 
@@ -145,6 +164,13 @@ int sink_func(struct xdp_md *ctx)
 #ifdef EXTRA_DEBUG
         bpf_printk(PROG_NAME " Not a first IPv4 fragment packet");
 #endif
+        if (iph->protocol == IPPROTO_TCP) {
+            stats_offset = STATS_IPV4_TCP_NON_FIRST_FRAGMENT;
+        } else if (iph->protocol == IPPROTO_UDP) {
+            stats_offset = STATS_IPV4_UDP_NON_FIRST_FRAGMENT;
+        } else {
+            stats_offset = STATS_IPV4_NEITHER_TCP_NOR_UDP_NON_FIRST_FRAGMENT;
+        }
         goto out;
     }
 
@@ -170,11 +196,11 @@ int sink_func(struct xdp_md *ctx)
     /* Check if UDP dest port indicates that an INT header
      * follows. */
     cfg_key = CONFIG_MAP_KEY_INT_UDP_ENCAP_DEST_PORT;
-    __u32 *cfg_val_ptr;
+    __u64 *cfg_val_ptr;
     __u16 int_udp_dest_port;
     cfg_val_ptr = bpf_map_lookup_elem(&sink_config_map, &cfg_key);
     if (cfg_val_ptr != NULL) {
-        int_udp_dest_port = (__be16)*cfg_val_ptr;
+        int_udp_dest_port = (__u16)*cfg_val_ptr;
     } else {
         int_udp_dest_port = bpf_htons(DEFAULT_INT_UDP_DEST_PORT);
     }
@@ -186,6 +212,7 @@ int sink_func(struct xdp_md *ctx)
                    bpf_ntohs(iph->id), bpf_ntohs(iph->tot_len),
                    bpf_ntohs(udph->dest));
 #endif // SEQNUM_DEBUG
+        stats_offset = STATS_IPV4_NO_INT_HEADER;
         goto out;
     }
 
@@ -214,9 +241,9 @@ int sink_func(struct xdp_md *ctx)
     // read node id from config map
     // enum ConfigKey node_id_key = NODE_ID;
     cfg_key = CONFIG_MAP_KEY_NODE_ID;
-    __u32 *node_id = bpf_map_lookup_elem(&sink_config_map, &cfg_key);
-    if (node_id != NULL) {
-        sink_node_id = *node_id;
+    __u64 *node_id_ptr = bpf_map_lookup_elem(&sink_config_map, &cfg_key);
+    if (node_id_ptr != NULL) {
+        sink_node_id = (__u32)*node_id_ptr;
     }
 
     if (parse_int_md_hdr(&nh, data_end, &intshimh, &intmdh, &intmdsrc, &seq_num,
@@ -264,6 +291,7 @@ int sink_func(struct xdp_md *ctx)
         key.sport = tcph->source;
         key.dport = tcph->dest;
     } else {
+        stats_offset = STATS_IPV4_NEITHER_TCP_NOR_UDP;
         bpf_printk(PROG_NAME " Dropping received"
                              " Ethernet+IPv4+UDP packet with dest port %u"
                              " indicating INT header follows, but original"
@@ -425,7 +453,7 @@ int sink_func(struct xdp_md *ctx)
                               NULL);
     }
     cfg_key = CONFIG_MAP_KEY_DROP_PACKET;
-    char *sink_type = bpf_map_lookup_elem(&sink_config_map, &cfg_key);
+    __u64 *sink_type = bpf_map_lookup_elem(&sink_config_map, &cfg_key);
     if (sink_type != NULL) {
         action = XDP_DROP;
         goto out;
@@ -472,8 +500,15 @@ int sink_func(struct xdp_md *ctx)
     iph->tot_len = bpf_htons(ip_newlen);
     iph->protocol = key.proto;
     ipv4_csum(iph);
+    if (key.proto == IPPROTO_TCP) {
+        stats_offset = STATS_IPV4_TCP_INT_HEADER_ADDED;
+    } else {
+        stats_offset = STATS_IPV4_UDP_INT_HEADER_ADDED;
+    }
 
 out:
+    update_stats(stats_base_addr + stats_offset, &sink_stats_map,
+                 pkt_len_for_stats);
     return action;
 }
 char _license[] SEC("license") = "GPL";

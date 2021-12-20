@@ -13,24 +13,79 @@
 #include <strings.h>
 #include <sys/socket.h>
 #include <pthread.h>
+#include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
+#include <stdarg.h>
+#include <signal.h>
+#include <errno.h>
 
 #define MAX_REPORT_PAYLOAD_LEN 2048
 #define T_LATENCY "Latency"
 #define T_DROP "Drop"
 
+int verbose = 1;
 static pthread_mutex_t send_packet_lock;
+static pthread_mutex_t printf_lock;
 
 /* buf must point at a buffer that is large enough to hold a string of
  * 16 characters, which includes up to 15 regular characters followed
  * by the null terminator of the C string. */
 
-#define IPV4_ADDR_DOTTED_DECIMAL_BUF_SIZE 16
-
 int init_send_packet_lock()
 {
     return pthread_mutex_init(&send_packet_lock, NULL);
+}
+
+int init_printf_lock() { return pthread_mutex_init(&printf_lock, NULL); }
+
+void printf_with_lock(const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    int val;
+
+    val = pthread_mutex_lock(&printf_lock);
+    if (val != 0) {
+        EPRT("Failed to take mutex lock on printf. err "
+             "code: %i\n",
+             val);
+        exit(1);
+    }
+    vprintf(format, args);
+    val = pthread_mutex_unlock(&printf_lock);
+    if (val != 0) {
+        EPRT("Failed to unlock mutex lock on printf. err "
+             "code: %i\n",
+             val);
+        exit(1);
+    }
+    va_end(args);
+}
+
+void prt_with_lock(char *str, const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    int val;
+
+    val = pthread_mutex_lock(&printf_lock);
+    if (val != 0) {
+        EPRT("Failed to take mutex lock on printf. err "
+             "code: %i\n",
+             val);
+        exit(1);
+    }
+    fprintf(stderr, "%s", str);
+    vfprintf(stderr, format, args);
+    val = pthread_mutex_unlock(&printf_lock);
+    if (val != 0) {
+        EPRT("Failed to unlock mutex lock on printf. err "
+             "code: %i\n",
+             val);
+        exit(1);
+    }
+    va_end(args);
 }
 
 void sprintf_ipv4_addr_dotted_decimal(char *buf,
@@ -51,6 +106,7 @@ int send_packet(char *server_name, __u32 server_addr, int server_port,
     int sockfd = -1;
     int serverlen;
     int ret = 0;
+    int lock_ret = 0;
     struct sockaddr_in serveraddr;
     struct addrinfo hints;
     struct addrinfo *result, *rp;
@@ -58,14 +114,20 @@ int send_packet(char *server_name, __u32 server_addr, int server_port,
     result = NULL;
     int n;
 
-    pthread_mutex_lock(&send_packet_lock);
+    lock_ret = pthread_mutex_lock(&send_packet_lock);
+    if (lock_ret != 0) {
+        EPRT("Failed to take mutex lock on send_packet. err "
+             "code: %i\n",
+             lock_ret);
+        exit(1);
+    }
     if (server_name) {
         memset(&hints, 0, sizeof(struct addrinfo));
         hints.ai_family = AF_UNSPEC;
         hints.ai_socktype = SOCK_DGRAM;
         hints.ai_flags = 0;
         hints.ai_protocol = 0; /* Any protocol */
-        snprintf(server_port_str, sizeof(server_port_str), "%d", server_port);
+        snprintf(server_port_str, sizeof(server_port_str), "%u", server_port);
         ret = getaddrinfo(server_name, server_port_str, &hints, &result);
         if (ret != 0) {
             EPRT("Error from getaddrinfo for server '%s': %s\n", server_name,
@@ -92,7 +154,9 @@ int send_packet(char *server_name, __u32 server_addr, int server_port,
             ret = -1;
             goto out;
         }
+#ifdef EXTRA_DEBUG
         VPRT("Report packet sent of length: %u\n", pkt_len);
+#endif
     } else {
         sockfd = socket(AF_INET, SOCK_DGRAM, 0);
         if (sockfd < 0) {
@@ -113,8 +177,10 @@ int send_packet(char *server_name, __u32 server_addr, int server_port,
             ret = -1;
             goto out;
         }
+#ifdef EXTRA_DEBUG
         VPRT("Sending report %i bytes to %s\n", n,
              inet_ntoa(serveraddr.sin_addr));
+#endif
     }
     ret = 0;
 out:
@@ -124,12 +190,18 @@ out:
     if (result != NULL) {
         freeaddrinfo(result);
     }
-    pthread_mutex_unlock(&send_packet_lock);
+    lock_ret = pthread_mutex_unlock(&send_packet_lock);
+    if (lock_ret != 0) {
+        EPRT("Failed to unlock mutex lock on send packet. err "
+             "code: %i\n",
+             lock_ret);
+        exit(1);
+    }
 
     return ret;
 }
 
-int send_latency_report(char *server_name, __u32 server_addr, int server_port,
+int send_latency_report(char *server_name, __u32 server_addr, __u16 server_port,
                         __u16 pkt_len, __u8 *pkt_data, int report_seq_num,
                         struct timespec *ts)
 {
@@ -262,4 +334,18 @@ void print_drop_report(FILE *out, struct int_drop_summary_data *data,
             saddr_buf, daddr_buf, key->proto, ntohs(key->sport),
             ntohs(key->dport));
     fflush(out);
+}
+
+void set_sig_handler(int signum, void (*handler)())
+{
+    struct sigaction act;
+    char buf[128];
+
+    memset(&act, 0, sizeof(act));
+    act.sa_handler = handler;
+    if (sigaction(signum, &act, NULL) != 0) {
+        strerror_r(errno, buf, sizeof(buf));
+        EPRT("sigaction failed: %s\n", buf);
+        exit(1);
+    }
 }

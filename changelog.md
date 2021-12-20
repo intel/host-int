@@ -1,3 +1,72 @@
+# Changes to Host-INT for Packet Telemetry in version 1.0.0
+
+
+## New features
+
+* Add packet count statistics to source and sink EBPF programs that
+  count different types of packets that have been processed, and each
+  possible error condition that can be encountered.
+
+* Add several command line options to `hostintctl` to show useful
+  information:
+  * `--show-statistics` shows packet counts statistics maintained by
+    source and sink EBPF programs.
+  * `--show-config-map` shows the current configuration values used by
+    the source and sink EBPF programs.
+  * `--show-filter-entries` shows the currently configured filter
+    entries, i.e. destination IP addresses that, when a packet is
+    destined to one of those IP addresses, a host should add INT
+    headers to the packet.
+  * `--show-latency-bucket` shows the configured ranges of one-way
+    packet latencies such that, when a packet's latency falls into a
+    different range than the previous packet, a latency INT report is
+    immediately triggered.
+
+* Changed default timeout to delete idle flows from 2 seconds to 2
+  minutes.
+
+* Changed configuration value of DSCP to only modify 6-bit DSCP
+  portion of the IPv4 ToS byte, not the entire 8-bit field.
+
+* Change `hostintctl` so that when attempting to load a source EBPF
+  program, it prevents doing so if the `hostintd` service is not
+  running.  Automatically use the same node ID for the source EBPF
+  program as configured for the sink.
+
+* Update libbpf to version 0.3
+
+
+## Fixes
+
+* Improved checking of input values from configuration file and from
+  command line options, with explicit error messages when one is out
+  of range, and return non-0 exit status.
+
+* Improved error checking throughout, and return non-0 exit status
+  when errors occur.
+
+* Consistently use variables of the correct size when reading and
+  writing the configuration EBPF maps.
+
+* Use `sigaction(2)` instead of deprecated `signal(2)` system calls.
+
+* Add mutex locks to protect access to a handful of global variables
+  in `hostintd`, which is a multi-threaded program.  Also add locking
+  to ensure that calls to logging functions are done one thread at a
+  time.
+
+* Fixed issues found by static analysis.
+
+
+## Documentation
+
+* Added documentation with example configuration of `logrotate` Linux
+  utility for configuring log rotation.
+
+* Add instructions on finding hostintd core dump files on supported
+  Linux distributions.
+
+
 # Changes to Host-INT for Packet Telemetry in version 0.1.1-alpha
 
 ## New features

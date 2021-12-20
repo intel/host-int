@@ -10,7 +10,7 @@
 #include <stdbool.h>
 #include "intbpf.h"
 
-#define VERSION "0.1.1-alpha"
+#define VERSION "1.0.0"
 
 #define PT_SINK 1
 #define PT_SOURCE 2
@@ -34,47 +34,41 @@ struct config {
     int xsk_if_queue;
     bool xsk_poll_mode;
     char filter_filename[512];
-    int node_id;
-    int dscp_val;
-    int dscp_mask;
-    int domain_specific_id;
-    int ins_bitmap;
+    __u32 node_id;
+    __u8 dscp_val;
+    __u8 dscp_mask;
+    __u16 domain_specific_id;
+    __u16 ins_bitmap;
     int idle_flow_timeout_ms;
     int pkt_loss_timeout_ms;
     char server_hostname[512];
     int server_port;
     char report_file[512];
-    int sender_collector_port;
+    __u16 sender_collector_port;
     bool drop_packet;
     bool sw_id_after_report_hdr;
-    int port;
+    __u16 port;
     char bind_addr[16];
     int prog_type;
     struct latency_bucket_entries latency_entries;
     int num_latency_entries;
     int encap_type;
+    int show_statistics;
+    int show_filter_entries;
+    int show_config_map;
+    int show_latency_bucket;
+    int copy_node_id;
+    bool test_node_id;
+    bool test_dscp_val;
+    bool test_dscp_mask;
+    bool test_domain_specific_id;
+    bool test_ins_bitmap;
+    bool test_sender_collector_port;
+    bool test_port;
 };
 
-/* Defined in common_params.o */
-extern int verbose;
-#define VPRT(format, args...)                                                  \
-    if (verbose) {                                                             \
-        printf(format, ##args);                                                \
-    }
-
-#define EPRT(format, args...)                                                  \
-    {                                                                          \
-        fprintf(stderr, "Error - ");                                           \
-        fprintf(stderr, format, ##args);                                       \
-    }
-#define WPRT(format, args...)                                                  \
-    {                                                                          \
-        fprintf(stderr, "Warning - ");                                         \
-        fprintf(stderr, format, ##args);                                       \
-    }
-
 #ifdef EXTRA_DEBUG
-#define DPRT(format, args...) fprintf(stderr, format, ##args)
+#define DPRT(format, args...) prt_with_lock("", format, ##args)
 #else
 #define DPRT(format, args...)
 #endif
@@ -92,7 +86,7 @@ extern int verbose;
 #define MAX_PKT_LOSS_TIMEOUT_MS 600000
 
 // Common params between source and sink
-#define DEFAULT_IDLE_FLOW_TIMEOUT_MS 2000
+#define DEFAULT_IDLE_FLOW_TIMEOUT_MS 120000
 #define PKT_LOSS_TIMEOUT_MS 200
 // time update params
 #define TU_INTERVAL_SEC 10
@@ -108,9 +102,11 @@ extern int verbose;
 #define SINK_MAP_FLOW_STATS "sink_flow_stats_map"
 #define SINK_MAP_CONFIG "sink_config_map"
 #define SINK_MAP_LATENCY "latency_bucket_map"
+#define SINK_MAP_STATS "sink_stats_map"
 #define SOURCE_MAP_EVENT_PERF "src_event_perf_map"
 #define SOURCE_MAP_FLOW_STATS "src_flow_stats_map"
 #define SOURCE_MAP_CONFIG "src_config_map"
 #define SOURCE_MAP_FILTER "src_dest_ipv4_filter_map"
+#define SOURCE_MAP_STATS "src_stats_map"
 
 #endif /* __COMMON_DEFINES_H */

@@ -13,6 +13,7 @@
 #include <linux/if_link.h> /* Need XDP flags */
 
 #include "common_defines.h"
+#include "common_report.h"
 
 #define MAX_ERRNO 4095
 
@@ -273,7 +274,7 @@ struct bpf_object *load_bpf_and_xdp_attach(struct config *cfg)
     }
 
     snprintf(cfg->progsec, sizeof(cfg->progsec), "%s",
-             bpf_program__title(bpf_prog, false));
+             bpf_program__section_name(bpf_prog));
 
     prog_fd = bpf_program__fd(bpf_prog);
     if (prog_fd <= 0) {

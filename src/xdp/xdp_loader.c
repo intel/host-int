@@ -21,6 +21,7 @@ static const char *__doc__ =
 #include <net/if.h>
 #include <linux/if_link.h> /* depend on kernel-headers installed */
 
+#include "common_report.h"
 #include "common_params.h"
 #include "common_user_bpf_xdp.h"
 
@@ -100,6 +101,11 @@ int main(int argc, char **argv)
 {
     struct bpf_object *bpf_obj;
     int err, len;
+
+    if (init_printf_lock() != 0) {
+        fprintf(stderr, "Mutex init failed.\n");
+        return EXIT_FAIL;
+    }
 
     struct config cfg = {
         .xdp_flags = XDP_FLAGS_UPDATE_IF_NOEXIST | XDP_FLAGS_DRV_MODE,

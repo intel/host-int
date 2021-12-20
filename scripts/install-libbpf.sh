@@ -9,7 +9,7 @@ git clone https://github.com/libbpf/libbpf
 cd libbpf
 # This is the version of libbpf that our project has been tested with
 # so far.
-git checkout 1339ef70a36f8013af12365998e8805df57519ba
+git checkout v0.3
 cd src
 make
 sudo make install

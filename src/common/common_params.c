@@ -15,8 +15,7 @@
 
 #include "intbpf.h"
 #include "common_params.h"
-
-int verbose = 1;
+#include "common_report.h"
 
 #define BUFSIZE 54 // 80-26=54
 
@@ -113,14 +112,15 @@ void copy_trimmed_string(char *dst, char *src, size_t dst_len)
     dst[copy_len] = 0;
 }
 
-int get_int(char *str)
+long long int get_int(char *str)
 {
     if (strlen(str) > 2 && str[0] == '0' && (str[1] == 'x' || str[1] == 'X')) {
-        return (int)strtol(str, NULL, 16);
+        return (long long int)strtoll(str, NULL, 16);
     } else {
-        return atoi(str);
+        return (long long int)atoll(str);
     }
 }
+
 void parse_cmdline_args(int argc, char **argv,
                         const struct option_wrapper *options_wrapper,
                         struct config *cfg, const char *doc)
@@ -130,6 +130,7 @@ void parse_cmdline_args(int argc, char **argv,
     long long int tmp_latency;
     bool full_help = false;
     int longindex = 0;
+    long long int tmp;
     char *dest;
     int i = 0;
     int opt;
@@ -140,10 +141,10 @@ void parse_cmdline_args(int argc, char **argv,
     }
 
     /* Parse commands line args */
-    while (
-        (opt = getopt_long(argc, argv,
-                           "hd:r:ASNFUMVQ:czpqf:n:v:m:t:l:s:i:C:P:o:b:T:B:E:DY",
-                           long_options, &longindex)) != -1) {
+    while ((opt = getopt_long(
+                argc, argv,
+                "hd:r:ASNFHUMVLQ:czpqf:n:v:m:t:l:s:i:C:P:o:b:T:B:E:DYGIJ",
+                long_options, &longindex)) != -1) {
         switch (opt) {
         case 'd':
             if (strlen(optarg) >= IF_NAMESIZE) {
@@ -193,6 +194,9 @@ void parse_cmdline_args(int argc, char **argv,
         case 'F':
             cfg->xdp_flags &= ~XDP_FLAGS_UPDATE_IF_NOEXIST;
             break;
+        case 'H':
+            cfg->show_statistics = true;
+            break;
         case 'M':
             cfg->reuse_maps = true;
             break;
@@ -229,22 +233,79 @@ void parse_cmdline_args(int argc, char **argv,
             copy_trimmed_string(dest, optarg, sizeof(cfg->filter_filename));
             break;
         case 'n':
-            cfg->node_id = get_int(optarg);
+            tmp = get_int(optarg);
+            if ((tmp >= 0) && (tmp <= 0xffffffff)) {
+                cfg->node_id = (__u32)tmp;
+                cfg->test_node_id = true;
+            } else {
+                fprintf(stderr,
+                        "ERR: Value %lld entered for Node id is invalid."
+                        " Min: 0, Max: 0xffffffff\n",
+                        tmp);
+                goto error;
+            }
             break;
         case 'v':
-            cfg->dscp_val = get_int(optarg);
+            tmp = get_int(optarg);
+            if ((tmp >= 0) && (tmp <= 0x3f)) {
+                cfg->dscp_val = (__u8)tmp;
+                cfg->test_dscp_val = true;
+            } else {
+                fprintf(stderr,
+                        "ERR: Value %lld entered for DSCP value is invalid. "
+                        "Min: 0, Max: 0x3f\n",
+                        tmp);
+                goto error;
+            }
             break;
         case 'm':
-            cfg->dscp_mask = get_int(optarg);
+            tmp = get_int(optarg);
+            if ((tmp >= 0) && (tmp <= 0x3f)) {
+                cfg->dscp_mask = (__u8)tmp;
+                cfg->test_dscp_mask = true;
+            } else {
+                fprintf(stderr,
+                        "ERR: Value %lld entered for DSCP mask is invalid. "
+                        "Min: 0, Max: 0x3f\n",
+                        tmp);
+                goto error;
+            }
             break;
         case 's':
-            cfg->domain_specific_id = get_int(optarg);
+            tmp = get_int(optarg);
+            if ((tmp >= 0) && (tmp <= 0xffff)) {
+                cfg->domain_specific_id = (__u16)tmp;
+                cfg->test_domain_specific_id = true;
+            } else {
+                fprintf(stderr,
+                        "ERR: Value %lld entered for "
+                        "Domain specific id is invalid. Min: 0, Max: 0xffff\n",
+                        tmp);
+                goto error;
+            }
             break;
         case 'i':
-            cfg->ins_bitmap = get_int(optarg);
+            tmp = get_int(optarg);
+            if ((tmp >= 0) && (tmp <= 0xffff)) {
+                cfg->ins_bitmap = (__u16)tmp;
+                cfg->test_ins_bitmap = true;
+            } else {
+                fprintf(stderr,
+                        "ERR: Value %lld entered for "
+                        "Instructions bitmap is invalid. Min: 0, Max: 0xffff\n",
+                        tmp);
+            }
             break;
         case 't':
             cfg->idle_flow_timeout_ms = atoi(optarg);
+            if (cfg->idle_flow_timeout_ms < 0) {
+                fprintf(
+                    stderr,
+                    "Error: Value %d given for option --idle-flow-timeout-ms"
+                    "is negative value. Minimum supported value: 0 ms\n",
+                    cfg->idle_flow_timeout_ms);
+                goto error;
+            }
             if (cfg->idle_flow_timeout_ms > MAX_IDLE_FLOW_TIMEOUT_MS) {
                 fprintf(
                     stderr,
@@ -256,6 +317,13 @@ void parse_cmdline_args(int argc, char **argv,
             break;
         case 'l':
             cfg->pkt_loss_timeout_ms = atoi(optarg);
+            if (cfg->pkt_loss_timeout_ms < 0) {
+                fprintf(stderr,
+                        "Error: Value %d given for option --pkt_loss-timeout-ms"
+                        "is negative value. Minimum supported value: 0 ms\n",
+                        cfg->pkt_loss_timeout_ms);
+                goto error;
+            }
             if (cfg->pkt_loss_timeout_ms > MAX_PKT_LOSS_TIMEOUT_MS) {
                 fprintf(stderr,
                         "Error: Value %d given for option --pkt_loss-timeout-ms"
@@ -276,10 +344,31 @@ void parse_cmdline_args(int argc, char **argv,
             copy_trimmed_string(dest, optarg, sizeof(cfg->report_file));
             break;
         case 5:
-            cfg->sender_collector_port = get_int(optarg);
+            tmp = get_int(optarg);
+            if ((tmp >= 0) && (tmp <= 0xffff)) {
+                cfg->sender_collector_port = (__u16)tmp;
+                cfg->test_sender_collector_port = true;
+            } else {
+                fprintf(stderr,
+                        "ERR: Value %lld entered for "
+                        "Sender_collector_port is invalid. "
+                        "Min: 0, Max: 0xffff\n",
+                        tmp);
+                goto error;
+            }
             break;
         case 6:
-            cfg->port = get_int(optarg);
+            tmp = get_int(optarg);
+            if ((tmp >= 0) && (tmp <= 0xffff)) {
+                cfg->port = (__u16)tmp;
+                cfg->test_port = true;
+            } else {
+                fprintf(stderr,
+                        "ERR: Value %lld entered for port is "
+                        "invalid. Min: 0, Max: 0xffff\n",
+                        tmp);
+                goto error;
+            }
             break;
         case 'b':
             dest = (char *)&cfg->bind_addr;
@@ -307,12 +396,28 @@ void parse_cmdline_args(int argc, char **argv,
                             tmp_latency);
                     goto error;
                 }
+                if (tmp_latency > MAX_LATENCY_BUCKET_VALUE) {
+                    fprintf(stderr,
+                            "Error: Latency bucket value entered %llu is"
+                            "larger than Max supported value %u\n",
+                            tmp_latency, MAX_LATENCY_BUCKET_VALUE);
+                    goto error;
+                }
+
                 lat_entry[i] = tmp_latency;
                 i++;
                 if (*optarg != ',')
                     break;
                 optarg++;
             }
+            if (*optarg != '\0') {
+                fprintf(stderr,
+                        "Error: Latency bucket must be a list of at most"
+                        "%d numbers separated by commas\n",
+                        LATENCYBUCKET_MAP_MAX_ENTRIES);
+                goto error;
+            }
+
             cfg->num_latency_entries = i;
 
             for (i = 0; i < (cfg->num_latency_entries - 1); i++) {
@@ -357,6 +462,18 @@ void parse_cmdline_args(int argc, char **argv,
             break;
         case 'D':
             cfg->drop_packet = true;
+            break;
+        case 'G':
+            cfg->show_filter_entries = true;
+            break;
+        case 'I':
+            cfg->show_config_map = true;
+            break;
+        case 'J':
+            cfg->copy_node_id = true;
+            break;
+        case 'L':
+            cfg->show_latency_bucket = true;
             break;
         case 'Y':
             cfg->sw_id_after_report_hdr = false;

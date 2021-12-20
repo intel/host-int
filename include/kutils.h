@@ -339,4 +339,17 @@ static __always_inline void debug_print_int_headers(void *int_hdrs,
     debug_print_4_bytes_hex(&(hdr[44]));
 }
 
+static __always_inline void update_stats(__u32 stats_addr,
+                                         struct bpf_map_def *stats_map,
+                                         __u16 pkt_len_bytes)
+{
+    __u64 pktlen = (__u64)pkt_len_bytes;
+    struct packet_byte_counter *stats =
+        bpf_map_lookup_elem(stats_map, &stats_addr);
+    if (stats) {
+        __sync_fetch_and_add(&stats->pkt_count, 1);
+        __sync_fetch_and_add(&stats->byte_count, pktlen);
+    }
+}
+
 #endif /* __KUTILS__ */
